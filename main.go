@@ -40,8 +40,10 @@ type Point struct {
 	Metrics map[string]float64 `json:"metrics"`
 }
 
+// ApiPayload struct updated to include version information
 type ApiPayload struct {
 	Hostname string               `json:"hostname"`
+	Version  string               `json:"version"` // Added version field
 	Labels   []string             `json:"labels"`
 	Series   map[string][]float64 `json:"series"`
 	Keys     []string             `json:"keys"`
@@ -64,11 +66,11 @@ func main() {
 
 	logFile, err := os.OpenFile("ftdc_utilization.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
-		log.Fatalf("Log dosyası açılamadı: %v", err)
+		log.Fatalf("Log file could not be opened: %v", err)
 	}
 	defer logFile.Close()
 	fileLogger = log.New(logFile, "", log.LstdFlags)
-	fileLogger.Println("--- Loglama başladı ---")
+	fileLogger.Println("--- Logging started ---")
 
 	if flagDir == "" {
 		log.Fatal("set -dir to the diagnostic.data folder")
@@ -82,7 +84,8 @@ func main() {
 		log.Fatalf("no metrics.* files found under %s", flagDir)
 	}
 
-	points, host, err := extractAll(files)
+	// extractAll now returns version information
+	points, host, version, err := extractAll(files)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -119,8 +122,10 @@ func main() {
 		groups[g] = append(groups[g], k)
 	}
 
+	// Payload now includes the version
 	payload := &ApiPayload{
 		Hostname: host,
+		Version:  version,
 		Labels:   labels,
 		Series:   series,
 		Keys:     keys,
@@ -154,9 +159,10 @@ func main() {
 
 /* ============================== FTDC Extraction ============================ */
 
-func extractAll(files []string) ([]Point, string, error) {
+// extractAll now returns the version as well
+func extractAll(files []string) ([]Point, string, string, error) {
 	var out []Point
-	var host string
+	var host, version string
 	var prev Point
 
 	for _, f := range files {
@@ -164,10 +170,10 @@ func extractAll(files []string) ([]Point, string, error) {
 		cmd := exec.Command("bsondump", "--quiet", f)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			return nil, "", err
+			return nil, "", "", err
 		}
 		if err := cmd.Start(); err != nil {
-			return nil, "", err
+			return nil, "", "", err
 		}
 
 		dec := json.NewDecoder(stdout)
@@ -177,7 +183,7 @@ func extractAll(files []string) ([]Point, string, error) {
 				if err == io.EOF {
 					break
 				}
-				return nil, "", err
+				return nil, "", "", err
 			}
 			if getNum(obj["type"]) != 1 {
 				continue
@@ -212,9 +218,16 @@ func extractAll(files []string) ([]Point, string, error) {
 					continue
 				}
 
+				// Extract hostname if not already found
 				if host == "" {
 					if h, ok := getNestedString(m, "serverStatus.host"); ok {
 						host = h
+					}
+				}
+				// Extract version if not already found
+				if version == "" {
+					if v, ok := getNestedString(m, "serverStatus.version"); ok {
+						version = v
 					}
 				}
 
@@ -245,7 +258,7 @@ func extractAll(files []string) ([]Point, string, error) {
 	if host == "" {
 		host = html.EscapeString(filepath.Base(flagDir))
 	}
-	return out, host, nil
+	return out, host, version, nil
 }
 
 /* ============================== Raw Collection ============================= */
@@ -304,7 +317,6 @@ func collectRaw(root map[string]any) map[string]float64 {
 				out["counter_opcounters_"+k] = v
 			}
 		}
-		// *** DEĞİŞİKLİK BURADA: Metrik yolu "metrics.document" olarak düzeltildi ***
 		if v, ok := getFloat(ss, "metrics.document.returned"); ok {
 			out["counter_docs_returned"] = v
 		}
@@ -469,6 +481,8 @@ func collectRaw(root map[string]any) map[string]float64 {
 
 	return out
 }
+// Remaining functions (finalize, groupOf, etc.) are unchanged.
+// They are included here for completeness.
 
 /* ============================== Finalize (rates) =========================== */
 
