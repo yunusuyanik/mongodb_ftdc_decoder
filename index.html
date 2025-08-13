@@ -1,0 +1,294 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>FTDC Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    :root {
+      --bg:#f8fafc; --fg:#0f172a; --muted:#475569; --card:#ffffff; --grid:#e5e7eb;
+      --border:#e2e8f0; --subtle:#f1f5f9; --chip:#334155; --chipbg:#e2e8f0;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 Inter,system-ui,Segoe UI,Roboto,Arial}
+    header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:center;background:var(--card)}
+    h1{font-size:16px;margin:0}
+    .wrap{max-width:1420px;margin:0 auto;padding:16px;display:grid;grid-template-columns:1fr;gap:18px}
+    .section{margin-top:8px}
+    .sec-title{font-size:18px;font-weight:700;margin:12px 0 16px 4px;color:#0f172a}
+    .grid{display:grid;grid-template-columns:1fr;gap:24px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden; box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);}
+    .pane{padding:16px 16px 8px}
+    .title{font-size:16px; color:#1e293b; font-weight:600; margin:0 0 12px 2px}
+    .chart{width:100%;height:340px}
+    .tablewrap{border-top:1px solid var(--border);background:var(--subtle); color: var(--muted); font-size: 13px;}
+    .actions{display:flex;gap:8px;align-items:center;padding:10px 12px}
+    .btn{border:1px solid var(--border);background:#fff;border-radius:8px;padding:6px 10px;cursor:pointer; font-size:12px;}
+    .btn:hover{background:#f1f5f9}
+    table{width:100%;border-collapse:collapse}
+    thead th{font-weight:600;color:#111827;background:var(--subtle);border-top:1px solid var(--border);border-bottom:1px solid var(--border); font-size:12px;}
+    thead th, tbody td{padding:8px 12px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap}
+    thead th:first-child, tbody td:first-child{text-align:left}
+    tbody tr{background:#fff;cursor:pointer}
+    tbody tr.off{color:#94a3b8}
+    tbody tr:hover{background:var(--subtle)}
+    .namecell{display:flex;align-items:center;gap:10px}
+    .dot{width:10px;height:10px;border-radius:999px;display:inline-block;border:1px solid rgba(0,0,0,.15)}
+    .chip{font-size:12px;color:var(--chip);background:var(--chipbg);padding:2px 8px;border-radius:999px}
+    .muted{color:var(--muted)}
+    .sortable{cursor:pointer}
+    .sortable::after{content:"";margin-left:6px;border:4px solid transparent;border-top-color:#94a3b8;display:inline-block;transform:translateY(2px)}
+    .asc.sortable::after{border-top-color:transparent;border-bottom-color:#334155;transform:translateY(-2px)}
+    @media (max-width:1000px){ .chart{height:300px} }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>FTDC Dashboard</h1>
+  <span id="host" class="muted"></span>
+  <span class="muted">• Tablo satırına tıkla: aç/kapa • ⌘/Ctrl + tık: yalnızca bu • Başlığa tıkla: sırala</span>
+</header>
+
+<div class="wrap" id="wrap"></div>
+
+<script>
+(async function () {
+  const res = await fetch('/api/data');
+  const data = await res.json();
+  document.getElementById('host').textContent = '— ' + (data.hostname || '');
+  const W = document.getElementById('wrap');
+  const L = data.labels;
+
+  function stats(arr){
+    const vals = (arr||[]).filter(v => typeof v === 'number' && !Number.isNaN(v));
+    if (!vals.length) return {min:null,max:null,avg:null,p95:null};
+    
+    vals.sort((a, b) => a - b);
+    const p95Index = Math.floor(vals.length * 0.95);
+    const p95 = vals[p95Index];
+
+    let min=vals[0], max=vals[vals.length - 1], sum=0;
+    for (const v of vals){ sum+=v; }
+    
+    return {min, max, avg: sum/vals.length, p95};
+  }
+
+  function fmt(v){
+    if (v == null || typeof v !== 'number' || Number.isNaN(v)) return '—';
+    return v.toFixed(2);
+  }
+
+  function buildSection(title){ const s=document.createElement('div'); s.className='section';
+    s.innerHTML=`<div class="sec-title">${title}</div><div class="grid"></div>`; W.appendChild(s); return s.querySelector('.grid'); }
+
+  function getDisplayName(key, title) {
+      if (title.toLowerCase().includes('disk')) {
+        const parts = key.split('_');
+        const device = parts[parts.length - 1];
+        if (key.includes('_read_')) {
+          return `${device} (read)`;
+        } else if (key.includes('_write_')) {
+          return `${device} (write)`;
+        }
+        return device;
+      }
+      return key;
+  }
+
+  function buildCard(grid, title, seriesKeys, unit){
+    if (!seriesKeys || seriesKeys.length === 0) return;
+
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="pane"><div class="title">${title}</div><div class="chart"></div></div>
+      <div class="tablewrap">
+        <div class="actions">
+          <span class="chip">series</span>
+          <button class="btn" data-act="all">All</button>
+          <button class="btn" data-act="none">None</button>
+          <button class="btn" data-act="inverse">Inverse</button>
+        </div>
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th class="sortable asc" data-k="name">name</th>
+              <th class="sortable" data-k="min">min</th>
+              <th class="sortable" data-k="avg">avg</th>
+              <th class="sortable" data-k="max">max</th>
+              <th class="sortable" data-k="p95">p95</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>`;
+    grid.appendChild(card);
+
+    const chart = echarts.init(card.querySelector('.chart'), 'light', {renderer:'canvas'});
+    const palette = ['#2563eb','#16a34a','#f59e0b','#ef4444','#8b5cf6','#0ea5e9','#f97316','#22c55e','#e11d48','#10b981','#a855f7','#84cc16'];
+
+    const legendSelected = {};
+    const series = seriesKeys.map((key, i) => {
+      const displayName = getDisplayName(key, title);
+      legendSelected[displayName] = true;
+      const arr = data.series[key] || Array(L.length).fill(null);
+      return {
+        name: displayName,
+        key: key, 
+        type:'line', data: arr, 
+        smooth: true,
+        showSymbol:false,
+        lineStyle:{width:2},
+        emphasis:{focus:'series'}, connectNulls:false,
+      };
+    });
+
+    chart.setOption({
+      tooltip:{
+        trigger:'axis',
+        confine:true,
+        valueFormatter: (value) => fmt(value) + (unit ? ` ${unit}`: '')
+      },
+      color: palette,
+      legend:{ show:false, selected: legendSelected },
+      grid:{ left:55,right:25,top:40,bottom:36,containLabel:false },
+      xAxis:{ type:'category', data:L, axisLabel:{show:false}, axisTick:{show:false}, axisLine:{lineStyle:{color:'#cbd5e1'}} },
+      yAxis:{ type:'value', axisLine:{show:false}, splitLine:{lineStyle:{color:'#e5e7eb'}},
+        axisLabel: {
+          formatter: (v) => fmt(v)
+        }
+      },
+      series
+    });
+
+    const tbody = card.querySelector('tbody');
+    const thead = card.querySelector('thead');
+    const btns = card.querySelectorAll('.actions .btn');
+
+    let rows = seriesKeys.map((key, i) => {
+      const arr = data.series[key] || [];
+      const st = stats(arr);
+      return {
+        key: key,
+        displayName: getDisplayName(key, title),
+        idx:i, color: palette[i % palette.length],
+        min: st.min, max: st.max, avg: st.avg, p95: st.p95, on: true
+      };
+    });
+
+    let sortState = {k:'name', asc:true};
+
+    function renderRows(){
+      const k = sortState.k;
+      rows.sort((a,b) => {
+        if (k==='name') return sortState.asc ? a.displayName.localeCompare(b.displayName) : b.displayName.localeCompare(a.displayName);
+        const av = a[k]; const bv = b[k];
+        if (av==null && bv==null) return 0;
+        if (av==null) return 1;
+        if (bv==null) return -1;
+        return sortState.asc ? (av-bv) : (bv-av);
+      });
+      tbody.innerHTML='';
+      for (const r of rows){
+        const tr = document.createElement('tr');
+        tr.className = r.on ? '' : 'off';
+        tr.dataset.key = r.key;
+        tr.innerHTML = `
+          <td class="namecell"><span class="dot" style="background:${r.color}"></span><span>${r.displayName}</span></td>
+          <td>${fmt(r.min)} ${unit||''}</td>
+          <td>${fmt(r.avg)} ${unit||''}</td>
+          <td>${fmt(r.max)} ${unit||''}</td>
+          <td>${fmt(r.p95)} ${unit||''}</td>
+        `;
+        tr.addEventListener('click', (ev) => {
+          const isolate = ev.metaKey || ev.ctrlKey;
+          if (isolate){
+            for (const rr of rows){
+              rr.on = (rr.key === r.key);
+              legendSelected[rr.displayName] = rr.on;
+            }
+          } else {
+            r.on = !r.on;
+            legendSelected[r.displayName] = r.on;
+          }
+          chart.setOption({legend:{selected:legendSelected}});
+          renderRows();
+        });
+        tbody.appendChild(tr);
+      }
+    }
+    renderRows();
+
+    thead.querySelectorAll('th.sortable').forEach(th=>{
+      th.addEventListener('click', ()=>{
+        const k = th.dataset.k;
+        if (sortState.k===k){ sortState.asc = !sortState.asc; }
+        else { sortState.k=k; sortState.asc = (k==='name'); }
+        thead.querySelectorAll('th').forEach(x=>x.classList.remove('asc'));
+        if (sortState.asc) th.classList.add('asc');
+        renderRows();
+      });
+    });
+
+    btns.forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const act = btn.dataset.act;
+        if (act==='all'){
+          rows.forEach(r=>{ r.on=true; legendSelected[r.displayName]=true; });
+        } else if (act==='none'){
+          rows.forEach(r=>{ r.on=false; legendSelected[r.displayName]=false; });
+        } else if (act==='inverse'){
+          rows.forEach(r=>{ r.on=!r.on; legendSelected[r.displayName]=r.on; });
+        }
+        chart.setOption({legend:{selected:legendSelected}});
+        renderRows();
+      });
+    });
+    window.addEventListener('resize', () => chart.resize());
+    return card;
+  }
+
+  /* =============================== SECTIONS =============================== */
+
+  const gMongo = buildSection('Mongo');
+  buildCard(gMongo, 'Query Executor (per sec)',
+    ['query_scanned_keys_per_sec','query_scanned_objects_per_sec','query_collection_scans_total_per_sec','query_collection_scans_nontailable_per_sec'], '');
+  buildCard(gMongo, 'TTL (per sec)', ['ttl_passes_per_sec','ttl_deletedDocuments_per_sec'], '');
+  buildCard(gMongo, 'Connections', ['connections_created_per_sec','connections_current','connections_available'], '');
+  // *** DEĞİŞİKLİK BURADA: 'opcounters_getmore_per_sec' eklendi ***
+  buildCard(gMongo, 'Opcounters (per sec)',
+    ['opcounters_query_per_sec','opcounters_insert_per_sec','opcounters_update_per_sec','opcounters_delete_per_sec','opcounters_command_per_sec', 'opcounters_getmore_per_sec'], '');
+  buildCard(gMongo, 'Documents (per sec)', ['docs_returned_per_sec','docs_inserted_per_sec','docs_updated_per_sec','docs_deleted_per_sec'], '');
+  buildCard(gMongo, 'Op Latency (avg ms)', ['latency_reads_avg_ms','latency_writes_avg_ms','latency_commands_avg_ms'], 'ms');
+
+  const gWT = buildSection('WiredTiger');
+  buildCard(gWT, 'IO (MB/s)', ['wt_read_mb_per_sec','wt_write_mb_per_sec'], 'MB/s');
+  buildCard(gWT, 'Cache (MB)',
+    ['wt_cache_bytes_in_cache_mb','wt_cache_dirty_bytes_mb','wt_cache_max_bytes_mb'], 'MB');
+  buildCard(gWT, 'Tickets', ['wt_tickets_avail_read','wt_tickets_avail_write'], '');
+
+  const gOS = buildSection('OS');
+  buildCard(gOS, 'CPU (%)', ['cpu_user_percent','cpu_system_percent','cpu_iowait_percent','cpu_softirq_percent','cpu_nice_percent','cpu_idle_percent'], '%');
+  buildCard(gOS, 'Memory (MB)', ['sys_mem_available_mb','sys_mem_total_mb'], 'MB');
+  buildCard(gOS, 'Network (MB/s)', ['network_bytes_in_per_sec','network_bytes_out_per_sec'], 'MB/s');
+
+  const gDisk = buildSection('OS / Disks');
+  const allKeys = Object.keys(data.series);
+  
+  const iopsKeys    = allKeys.filter(k => k.startsWith('disk_') && (k.includes('_read_iops_') || k.includes('_write_iops_')));
+  const mbpsKeys    = allKeys.filter(k => k.startsWith('disk_') && (k.includes('_read_mbps_') || k.includes('_write_mbps_')));
+  const latKeys     = allKeys.filter(k => k.startsWith('disk_') && (k.includes('_read_latency_ms_') || k.includes('_write_latency_ms_')));
+  const utilKeys    = allKeys.filter(k => k.startsWith('disk_') && k.includes('_utilization_percent_'));
+  const queueKeys   = allKeys.filter(k => k.startsWith('disk_') && k.includes('_queue_depth_avg_'));
+
+  buildCard(gDisk, 'Disk IOPS (per device)', iopsKeys, 'iops');
+  buildCard(gDisk, 'Disk Throughput (MB/s per device)', mbpsKeys, 'MB/s');
+  buildCard(gDisk, 'Disk Latency (ms per device)', latKeys, 'ms');
+  buildCard(gDisk, 'Disk Utilization (% per device)', utilKeys, '%');
+  buildCard(gDisk, 'Disk Queue Depth (avg per device)', queueKeys, '');
+
+})();
+</script>
+</body>
+</html>
