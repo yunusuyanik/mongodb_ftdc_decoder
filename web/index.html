@@ -5,22 +5,45 @@
   <title>FTDC Dashboard</title>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <style>
+    /* General styles */
     :root {
       --bg:#f8fafc; --fg:#0f172a; --muted:#475569; --card:#ffffff; --grid:#e5e7eb;
       --border:#e2e8f0; --subtle:#f1f5f9; --chip:#334155; --chipbg:#e2e8f0;
     }
     *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 Inter,system-ui,Segoe UI,Roboto,Arial}
-    header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:center;background:var(--card)}
+    header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;gap:16px;align-items:center;background:var(--card)}
     h1{font-size:16px;margin:0}
-    .wrap{max-width:1420px;margin:0 auto;padding:16px;display:grid;grid-template-columns:1fr;gap:18px}
+    
+    /* Full-width layout */
+    .wrap{width:100%;margin:0 auto;padding:24px;display:grid;grid-template-columns:1fr;gap:18px}
+    
+    /* Collapsible section styles */
     .section{margin-top:8px}
-    .sec-title{font-size:18px;font-weight:700;margin:12px 0 16px 4px;color:#0f172a}
-    .grid{display:grid;grid-template-columns:1fr;gap:24px}
+    .sec-title{font-size:18px;font-weight:700;margin:12px 0 16px 4px;color:#0f172a;cursor:pointer;position:relative;padding-left:20px;user-select:none}
+    .sec-title::before {
+        content: '▼';
+        position: absolute;
+        left: 0;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 12px;
+        transition: transform 0.2s;
+    }
+    .sec-title.collapsed::before {
+        transform: translateY(-50%) rotate(-90deg);
+    }
+    
+    /* Two-column grid layout for charts */
+    .grid{display:grid;grid-template-columns:1fr;gap:24px; overflow:hidden; transition: max-height 0.5s ease-out;}
+    
+    /* Card styles */
     .card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden; box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);}
     .pane{padding:16px 16px 8px}
     .title{font-size:16px; color:#1e293b; font-weight:600; margin:0 0 12px 2px}
     .chart{width:100%;height:340px}
+    
+    /* Table styles */
     .tablewrap{border-top:1px solid var(--border);background:var(--subtle); color: var(--muted); font-size: 13px;}
     .actions{display:flex;gap:8px;align-items:center;padding:10px 12px}
     .btn{border:1px solid var(--border);background:#fff;border-radius:8px;padding:6px 10px;cursor:pointer; font-size:12px;}
@@ -39,6 +62,13 @@
     .sortable{cursor:pointer}
     .sortable::after{content:"";margin-left:6px;border:4px solid transparent;border-top-color:#94a3b8;display:inline-block;transform:translateY(2px)}
     .asc.sortable::after{border-top-color:transparent;border-bottom-color:#334155;transform:translateY(-2px)}
+    
+    /* Media queries for responsive layout */
+    @media (min-width: 1200px) {
+      .grid {
+        grid-template-columns: repeat(2, 1fr); /* Two columns on large screens */
+      }
+    }
     @media (max-width:1000px){ .chart{height:300px} }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
@@ -47,7 +77,7 @@
 <header>
   <h1>FTDC Dashboard</h1>
   <span id="host" class="muted"></span>
-  <span class="muted">• Tablo satırına tıkla: aç/kapa • ⌘/Ctrl + tık: yalnızca bu • Başlığa tıkla: sırala</span>
+  <span id="version" class="muted"></span> <span class="muted">• Click table row: toggle • ⌘/Ctrl+click: isolate • Click header: sort</span>
 </header>
 
 <div class="wrap" id="wrap"></div>
@@ -56,7 +86,11 @@
 (async function () {
   const res = await fetch('/api/data');
   const data = await res.json();
-  document.getElementById('host').textContent = '— ' + (data.hostname || '');
+  
+  // Set host and version in the header
+  document.getElementById('host').textContent = 'Host: ' + (data.hostname || 'N/A');
+  document.getElementById('version').textContent = 'Version: ' + (data.version || 'N/A');
+
   const W = document.getElementById('wrap');
   const L = data.labels;
 
@@ -79,8 +113,37 @@
     return v.toFixed(2);
   }
 
-  function buildSection(title){ const s=document.createElement('div'); s.className='section';
-    s.innerHTML=`<div class="sec-title">${title}</div><div class="grid"></div>`; W.appendChild(s); return s.querySelector('.grid'); }
+  // Function to build a collapsible section
+  function buildSection(title){ 
+    const s = document.createElement('div'); 
+    s.className='section';
+    const secTitle = document.createElement('div');
+    secTitle.className = 'sec-title';
+    secTitle.textContent = title;
+    
+    const grid = document.createElement('div');
+    grid.className = 'grid';
+    
+    s.appendChild(secTitle);
+    s.appendChild(grid);
+    W.appendChild(s);
+    
+    // Make the section collapsible
+    secTitle.addEventListener('click', () => {
+      secTitle.classList.toggle('collapsed');
+      const isCollapsed = secTitle.classList.contains('collapsed');
+      grid.style.maxHeight = isCollapsed ? '0px' : (grid.scrollHeight + 'px');
+      if (!isCollapsed) {
+          // Recalculate height in case of window resize when it was collapsed
+          setTimeout(() => grid.style.maxHeight = (grid.scrollHeight + 'px'), 5);
+      }
+    });
+
+    // Set initial maxHeight for transition
+    grid.style.maxHeight = grid.scrollHeight + 'px';
+
+    return grid; 
+  }
 
   function getDisplayName(key, title) {
       if (title.toLowerCase().includes('disk')) {
@@ -245,34 +308,43 @@
         renderRows();
       });
     });
-    window.addEventListener('resize', () => chart.resize());
+    window.addEventListener('resize', () => {
+        chart.resize();
+        // Update maxHeight for collapsible sections on resize
+        document.querySelectorAll('.sec-title:not(.collapsed) + .grid').forEach(grid => {
+            grid.style.maxHeight = grid.scrollHeight + 'px';
+        });
+    });
     return card;
   }
 
   /* =============================== SECTIONS =============================== */
 
+  // Mongo
   const gMongo = buildSection('Mongo');
+  buildCard(gMongo, 'Connections', ['connections_created_per_sec','connections_current','connections_available'], '');
+  buildCard(gMongo, 'Opcounters (per sec)',
+    ['opcounters_query_per_sec','opcounters_insert_per_sec','opcounters_update_per_sec','opcounters_delete_per_sec','opcounters_command_per_sec'], '');
+  buildCard(gMongo, 'Documents (per sec)', ['docs_returned_per_sec','docs_inserted_per_sec','docs_updated_per_sec','docs_deleted_per_sec'], '');
+  buildCard(gMongo, 'Op Latency (avg ms)', ['latency_reads_avg_ms','latency_writes_avg_ms','latency_commands_avg_ms'], 'ms');
   buildCard(gMongo, 'Query Executor (per sec)',
     ['query_scanned_keys_per_sec','query_scanned_objects_per_sec','query_collection_scans_total_per_sec','query_collection_scans_nontailable_per_sec'], '');
   buildCard(gMongo, 'TTL (per sec)', ['ttl_passes_per_sec','ttl_deletedDocuments_per_sec'], '');
-  buildCard(gMongo, 'Connections', ['connections_created_per_sec','connections_current','connections_available'], '');
-  // *** DEĞİŞİKLİK BURADA: 'opcounters_getmore_per_sec' eklendi ***
-  buildCard(gMongo, 'Opcounters (per sec)',
-    ['opcounters_query_per_sec','opcounters_insert_per_sec','opcounters_update_per_sec','opcounters_delete_per_sec','opcounters_command_per_sec', 'opcounters_getmore_per_sec'], '');
-  buildCard(gMongo, 'Documents (per sec)', ['docs_returned_per_sec','docs_inserted_per_sec','docs_updated_per_sec','docs_deleted_per_sec'], '');
-  buildCard(gMongo, 'Op Latency (avg ms)', ['latency_reads_avg_ms','latency_writes_avg_ms','latency_commands_avg_ms'], 'ms');
 
+  // WiredTiger
   const gWT = buildSection('WiredTiger');
-  buildCard(gWT, 'IO (MB/s)', ['wt_read_mb_per_sec','wt_write_mb_per_sec'], 'MB/s');
   buildCard(gWT, 'Cache (MB)',
     ['wt_cache_bytes_in_cache_mb','wt_cache_dirty_bytes_mb','wt_cache_max_bytes_mb'], 'MB');
+  buildCard(gWT, 'IO (MB/s)', ['wt_read_mb_per_sec','wt_write_mb_per_sec'], 'MB/s');
   buildCard(gWT, 'Tickets', ['wt_tickets_avail_read','wt_tickets_avail_write'], '');
 
+  // OS
   const gOS = buildSection('OS');
   buildCard(gOS, 'CPU (%)', ['cpu_user_percent','cpu_system_percent','cpu_iowait_percent','cpu_softirq_percent','cpu_nice_percent','cpu_idle_percent'], '%');
   buildCard(gOS, 'Memory (MB)', ['sys_mem_available_mb','sys_mem_total_mb'], 'MB');
   buildCard(gOS, 'Network (MB/s)', ['network_bytes_in_per_sec','network_bytes_out_per_sec'], 'MB/s');
 
+  // Disks (Per-device)
   const gDisk = buildSection('OS / Disks');
   const allKeys = Object.keys(data.series);
   
@@ -287,6 +359,11 @@
   buildCard(gDisk, 'Disk Latency (ms per device)', latKeys, 'ms');
   buildCard(gDisk, 'Disk Utilization (% per device)', utilKeys, '%');
   buildCard(gDisk, 'Disk Queue Depth (avg per device)', queueKeys, '');
+
+  // Adjust maxHeight for all sections after initial render
+  document.querySelectorAll('.sec-title:not(.collapsed) + .grid').forEach(grid => {
+      grid.style.maxHeight = grid.scrollHeight + 'px';
+  });
 
 })();
 </script>
