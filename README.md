@@ -22,29 +22,12 @@ Open the printed URL (e.g., `http://127.0.0.1:<generatedport>/`) in your browser
 |----------|--------------------------------------|
 | `-dir`   | **Required.** Path to `diagnostic.data` |
 | `-debug` | Print verbose logs                   |
+| `-genlogs` | Generate decoded log and parsed log files with deltas                   |
 
 ---
 
 ## 📄 Output Files
 
-- **`metric_deltas.log`** – Metric delta values
-- **`ftdc_utilization.log`** – Utilization summary
+- **`metric_deltas_{timestamp}.log`** – Parsed metric delta values
+- **`fully_decoded_metrics_{timestamp}.log`** – Decoded logs
 
----
-
-## 📂 Project Layout
-```
-ftdc_dashboard/
-├─ main.go
-├─ go.mod
-├─ go.sum
-├─ web/
-└─ web/index.html
-```
-
----
-
-## 💡 Tips
-
-- Ensure `-dir` points to the folder containing `metrics.*` files.
-- Use `-debug` to get detailed logs for troubleshooting.
