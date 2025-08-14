@@ -5,10 +5,6 @@
   <title>FTDC Dashboard</title>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <style>
-    /* Style variables for consistent theming.
-      We define colors for background, text,
-      cards, borders, and other elements here.
-    */
     :root {
       --bg:#f8fafc; --fg:#0f172a; --muted:#475569; --card:#ffffff; --grid:#e5e7eb;
       --border:#e2e8f0; --subtle:#f1f5f9; --chip:#334155; --chipbg:#e2e8f0; --red: #ef4444;
@@ -18,29 +14,15 @@
     header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;gap:16px;align-items:center;background:var(--card)}
     h1{font-size:16px;margin:0}
     .wrap{width:100%;margin:0 auto;padding:24px;display:grid;grid-template-columns:1fr;gap:18px}
-    
-    /* Styles for the main collapsible sections
-      that group the chart cards together.
-    */
     .section{margin-top:8px}
     .sec-title{font-size:18px;font-weight:700;margin:12px 0 16px 4px;color:#0f172a;cursor:pointer;position:relative;padding-left:20px;user-select:none}
     .sec-title::before { content: '▼'; position: absolute; left: 0; top: 50%; transform: translateY(-50%); font-size: 12px; transition: transform 0.2s; }
     .sec-title.collapsed::before { transform: translateY(-50%) rotate(-90deg); }
-    
-    /* Grid layout for the chart cards.
-      It defaults to one column and becomes
-      two columns on wider screens.
-    */
     .grid{display:grid;grid-template-columns:1fr;gap:24px; overflow:hidden; transition: max-height 0.3s ease-in-out;}
     .card{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden; box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);}
     .pane{padding:16px 16px 8px}
     .title{font-size:16px; color:#1e293b; font-weight:600; margin:0 0 12px 2px}
     .chart{width:100%;height:340px}
-    
-    /*
-      Table styles used inside each chart card
-      to display detailed metric statistics.
-    */
     .tablewrap{border-top:1px solid var(--border);background:var(--subtle); color: var(--muted); font-size: 13px;}
     .actions{display:flex;gap:8px;align-items:center;padding:10px 12px}
     .btn{border:1px solid var(--border);background:#fff;border-radius:8px;padding:6px 10px;cursor:pointer; font-size:12px;}
@@ -59,10 +41,6 @@
     .sortable{cursor:pointer}
     .sortable::after{content:"";margin-left:6px;border:4px solid transparent;border-top-color:#94a3b8;display:inline-block;transform:translateY(2px)}
     .asc.sortable::after{border-top-color:transparent;border-bottom-color:#334155;transform:translateY(-2px)}
-    
-    /*
-      Styles for the top summary panel.
-    */
     .summary-container { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: stretch; overflow: hidden; transition: max-height 0.3s ease-in-out; }
     .summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 32px; }
     .summary-section h3 { font-size: 14px; margin: 0 0 8px; color: var(--muted); border-bottom: 1px solid var(--border); padding-bottom: 4px; }
@@ -70,17 +48,13 @@
     .summary-section li { display: flex; justify-content: space-between; padding: 4px 0; flex-wrap: wrap; }
     .summary-section li span:first-child { font-weight: 600; color: var(--fg); margin-right: 8px; }
     .summary-section li span:last-child { color: var(--muted); text-align: right; }
-    
-    /*
-      Styles for the collapsible config viewer.
-    */
     details.config-details { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
     summary.config-summary { cursor: pointer; padding: 8px 12px; font-weight: 600; background: var(--subtle); list-style: none; }
     summary.config-summary::-webkit-details-marker { display: none; }
     .config-view { margin:0; background: #0d1117; color: #c9d1d9; font-family: monospace; font-size: 13px; padding: 16px; overflow: auto; line-height: 1.6; max-height: 250px; }
     .config-change-dot { color: var(--red); margin-left: 8px; font-size: 16px; line-height: 1; display: inline-block; vertical-align: middle; }
-
-    /* Media queries for responsive layout adjustments. */
+    .repl-chart-container { background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05); padding: 16px; }
+    .repl-chart { width: 100%; }
     @media (min-width: 1200px) { .grid { grid-template-columns: repeat(2, 1fr); } }
     @media (max-width: 1024px) { .summary-container { grid-template-columns: 1fr; } }
     @media (max-width: 768px) { .summary-grid { grid-template-columns: 1fr; } }
@@ -103,10 +77,155 @@
   const W = document.getElementById('wrap');
   const L = data.labels;
 
-  /* ========================================================
-    SUMMARY AND CONFIGURATION VIEWER
-    ========================================================
-  */
+  const totalDurationHours = (L && L.length > 1) ? (new Date(L[L.length - 1]).getTime() - new Date(L[0]).getTime()) / (1000 * 60 * 60) : 0;
+  const useDailyTimeFormat = totalDurationHours > 48;
+
+  function buildReplStatusChartContainer(timeline) {
+    if (!timeline || timeline.length === 0) return null;
+    
+    const eventsByNode = timeline.reduce((acc, event) => {
+        if (!acc[event.name]) acc[event.name] = [];
+        acc[event.name].push(true);
+        return acc;
+    }, {});
+    const nodeCount = Object.keys(eventsByNode).length;
+
+    const container = document.createElement('div');
+    container.className = 'section';
+    const chartHeight = nodeCount * 40 + 60;
+    container.innerHTML = `
+        <div class="sec-title">Node States</div>
+        <div class="repl-chart-container">
+            <div class="repl-chart" style="height:${chartHeight}px"></div>
+        </div>
+    `;
+    return container;
+  }
+
+  function initReplStatusChart(containerEl, timeline, labels) {
+    if (!containerEl || !timeline || timeline.length === 0) return;
+
+    const stateColors = {
+        PRIMARY: '#6a994e', SECONDARY: '#f5b700', ARBITER: '#a2d2ff',
+        RECOVERING: '#ef476f', STARTUP: '#8338ec', STARTUP2: '#8338ec',
+        UNKNOWN: '#6c757d', DOWN: '#d62828', ROLLBACK: '#ff7b00',
+    };
+    const legendData = [];
+
+    const eventsByNode = timeline.reduce((acc, event) => {
+        if (!acc[event.name]) acc[event.name] = [];
+        acc[event.name].push({ t: new Date(event.t), state: event.state });
+        return acc;
+    }, {});
+
+    const nodeNames = Object.keys(eventsByNode).sort();
+    const chartData = [];
+    const stateSet = new Set();
+
+    nodeNames.forEach((name, nodeIndex) => {
+        const events = eventsByNode[name].sort((a, b) => a.t - b.t);
+        if (events.length === 0) return;
+
+        let segmentStartEvent = events[0];
+
+        for (let i = 1; i < events.length; i++) {
+            if (events[i].state !== segmentStartEvent.state) {
+                const startTime = segmentStartEvent.t.getTime();
+                const endTime = events[i].t.getTime();
+                
+                chartData.push({
+                    name: segmentStartEvent.state,
+                    value: [nodeIndex, startTime, endTime, segmentStartEvent.state]
+                });
+                stateSet.add(segmentStartEvent.state);
+                segmentStartEvent = events[i];
+            }
+        }
+
+        const lastSegmentStartTime = segmentStartEvent.t.getTime();
+        const lastSegmentEndTime = new Date(labels[labels.length - 1]).getTime();
+        chartData.push({
+            name: segmentStartEvent.state,
+            value: [nodeIndex, lastSegmentStartTime, lastSegmentEndTime, segmentStartEvent.state]
+        });
+        stateSet.add(segmentStartEvent.state);
+    });
+
+    for(const state of stateSet) {
+        legendData.push({name: state, itemStyle: {color: stateColors[state] || '#ced4da'}});
+    }
+    
+    const chartDom = containerEl.querySelector('.repl-chart');
+    const myChart = echarts.init(chartDom);
+
+    function renderItem(params, api) {
+        const categoryIndex = api.value(0);
+        const start = api.coord([api.value(1), categoryIndex]);
+        const end = api.coord([api.value(2), categoryIndex]);
+        const height = api.size([0, 1])[1];
+        const state = api.value(3);
+        if (!start || !end) return;
+
+        const rectShape = echarts.graphic.clipRectByRect({
+            x: start[0],
+            y: start[1] - height / 2,
+            width: end[0] - start[0],
+            height: height
+        }, {
+            x: params.coordSys.x,
+            y: params.coordSys.y,
+            width: params.coordSys.width,
+            height: params.coordSys.height
+        });
+
+        return rectShape && {
+            type: 'rect',
+            transition: ['shape'],
+            shape: rectShape,
+            style: {
+                fill: stateColors[state] || '#ced4da',
+                text: state,
+                textFill: '#fff',
+                textPosition: 'inside',
+                fontWeight: 'bold',
+                fontSize: 10,
+            }
+        };
+    }
+
+    const option = {
+        tooltip: {
+            formatter: function (params) {
+                const state = params.value[3];
+                const start = new Date(params.value[1]).toLocaleString();
+                const end = new Date(params.value[2]).toLocaleString();
+                return `${nodeNames[params.value[0]]}<br/><b>${state}</b><br/>${start} - ${end}`;
+            }
+        },
+        legend: {
+          show: true, data: legendData, bottom: 0, type: 'scroll'
+        },
+        grid: {
+            height: nodeNames.length * 40, top: 20, bottom: 60,
+            left: 20, right: 50, containLabel: true,
+        },
+        xAxis: {
+            type: 'time',
+            min: new Date(labels[0]).getTime(),
+            max: new Date(labels[labels.length - 1]).getTime(),
+            axisLabel: { formatter: useDailyTimeFormat ? '{MM}-{dd}' : '{HH}:{mm}' }
+        },
+        yAxis: {
+            type: 'category', data: nodeNames, axisLabel: { interval: 0 }
+        },
+        series: [{
+            type: 'custom', renderItem: renderItem, itemStyle: { opacity: 0.9 },
+            encode: { x: [1, 2], y: 0 }, data: chartData
+        }]
+    };
+    myChart.setOption(option);
+  }
+
   const getConfigVal = (path, fallback = 'N/A') => {
     try {
       const value = path.split('.').reduce((o, k) => o[k], data.config);
@@ -121,7 +240,7 @@
   };
 
   function buildSummaryViewer(config, configChanged) {
-    if (!config) return;
+    if (!config) return null;
 
     const section = document.createElement('div');
     section.className = 'section';
@@ -133,84 +252,82 @@
     const content = document.createElement('div');
     content.className = 'summary-container'; 
 
-    const summaryWrapper = document.createElement('div');
-    summaryWrapper.className = 'summary-grid';
-    summaryWrapper.innerHTML = `
-      <div class="summary-section">
-        <h3>Version & Build</h3>
-        <ul>
-          <li><span>Hostname:</span> <span>${getConfigVal('hostInfo.system.hostname')}</span></li>
-          <li><span>Mongo Version:</span> <span>${getConfigVal('buildInfo.version')} (${(getConfigVal('buildInfo.modules.0', 'community'))})</span></li>
-          <li><span>OS:</span> <span>${getConfigVal('hostInfo.os.name')}</span></li>
-          <li><span>Git Version:</span> <span>${getConfigVal('buildInfo.gitVersion')}</span></li>
-        </ul>
+    content.innerHTML = `
+      <div class="summary-grid">
+        <div class="summary-section">
+          <h3>Version & Build</h3>
+          <ul>
+            <li><span>Hostname:</span> <span>${getConfigVal('hostInfo.system.hostname')}</span></li>
+            <li><span>Mongo Version:</span> <span>${getConfigVal('buildInfo.version')} (${(getConfigVal('buildInfo.modules.0', 'community'))})</span></li>
+            <li><span>OS:</span> <span>${getConfigVal('hostInfo.os.name')}</span></li>
+            <li><span>Git Version:</span> <span>${getConfigVal('buildInfo.gitVersion')}</span></li>
+          </ul>
+        </div>
+        <div class="summary-section">
+          <h3>Network & Replication</h3>
+          <ul>
+            <li><span>IP Addresses:</span> <span>${getConfigVal('getCmdLineOpts.parsed.net.bindIp')}</span></li>
+            <li><span>Port:</span> <span>${getConfigVal('getCmdLineOpts.parsed.net.port')}</span></li>
+            <li><span>Replica Set:</span> <span>${getConfigVal('getCmdLineOpts.parsed.replication.replSetName', 'Not in a replicaset')}</span></li>
+            <li><span>Security:</span> <span>${getConfigVal('getCmdLineOpts.parsed.security.clusterAuthMode', 'N/A')}</span></li>
+            <li><span>TLS Mode:</span> <span>${getConfigVal('getCmdLineOpts.parsed.net.tls.mode', 'disabled')}</span></li>
+          </ul>
+        </div>
+        <div class="summary-section">
+          <h3>Storage & Logging</h3>
+          <ul>
+            <li><span>Data Path (dbPath):</span> <span>${getConfigVal('getCmdLineOpts.parsed.storage.dbPath')}</span></li>
+            <li><span>Log Path:</span> <span>${getConfigVal('getCmdLineOpts.parsed.systemLog.path')}</span></li>
+            <li><span>Journaling:</span> <span>${getConfigVal('getCmdLineOpts.parsed.storage.journal.enabled', 'false')}</span></li>
+          </ul>
+        </div>
+        <div class="summary-section">
+          <h3>Server & Limits</h3>
+          <ul>
+            <li><span>CPU:</span> <span>${getConfigVal('hostInfo.system.numCores')} Cores</span></li>
+            <li><span>CPU Arch:</span> <span>${getConfigVal('hostInfo.system.cpuArch')}</span></li>
+            <li><span>RAM:</span> <span>${getConfigVal('hostInfo.system.memSizeMB')} MB</span></li>
+            <li><span>Open Files Limit:</span> <span>${getConfigVal('ulimits.fileDescriptors.soft')}</span></li>
+          </ul>
+        </div>
       </div>
-      <div class="summary-section">
-        <h3>Network & Replication</h3>
-        <ul>
-          <li><span>IP Addresses:</span> <span>${getConfigVal('getCmdLineOpts.parsed.net.bindIp')}</span></li>
-          <li><span>Port:</span> <span>${getConfigVal('getCmdLineOpts.parsed.net.port')}</span></li>
-          <li><span>Replica Set:</span> <span>${getConfigVal('getCmdLineOpts.parsed.replication.replSetName', 'Not in a replicaset')}</span></li>
-          <li><span>Security:</span> <span>${getConfigVal('getCmdLineOpts.parsed.security.clusterAuthMode', 'N/A')}</span></li>
-          <li><span>TLS Mode:</span> <span>${getConfigVal('getCmdLineOpts.parsed.net.tls.mode', 'disabled')}</span></li>
-        </ul>
-      </div>
-      <div class="summary-section">
-        <h3>Storage & Logging</h3>
-        <ul>
-          <li><span>Data Path (dbPath):</span> <span>${getConfigVal('getCmdLineOpts.parsed.storage.dbPath')}</span></li>
-          <li><span>Log Path:</span> <span>${getConfigVal('getCmdLineOpts.parsed.systemLog.path')}</span></li>
-          <li><span>Journaling:</span> <span>${getConfigVal('getCmdLineOpts.parsed.storage.journal.enabled', 'false')}</span></li>
-        </ul>
-      </div>
-      <div class="summary-section">
-        <h3>Server & Limits</h3>
-        <ul>
-          <li><span>CPU:</span> <span>${getConfigVal('hostInfo.system.numCores')} Cores</span></li>
-          <li><span>CPU Arch:</span> <span>${getConfigVal('hostInfo.system.cpuArch')}</span></li>
-          <li><span>RAM:</span> <span>${getConfigVal('hostInfo.system.memSizeMB')} MB</span></li>
-          <li><span>Open Files Limit:</span> <span>${getConfigVal('ulimits.fileDescriptors.soft')}</span></li>
-        </ul>
+      <div>
+        <details class="config-details">
+          <summary class="config-summary">
+            Active Configuration (parsed)
+            ${configChanged ? '<span class="config-change-dot" title="Configuration changed during this period">●</span>' : ''}
+          </summary>
+          <pre class="config-view">${JSON.stringify(getConfigVal('getCmdLineOpts.parsed', {}), null, 2)}</pre>
+        </details>
       </div>
     `;
 
-    const configWrapper = document.createElement('div');
-    const activeConfig = getConfigVal('getCmdLineOpts.parsed', {});
-    
-    configWrapper.innerHTML = `
-      <details class="config-details">
-        <summary class="config-summary">
-          Active Configuration (parsed)
-          ${configChanged ? '<span class="config-change-dot" title="Configuration changed during this period">●</span>' : ''}
-        </summary>
-        <pre class="config-view">${JSON.stringify(activeConfig, null, 2)}</pre>
-      </details>
-    `;
-
-    content.appendChild(summaryWrapper);
-    content.appendChild(configWrapper);
     section.appendChild(title);
     section.appendChild(content);
-    W.insertBefore(section, W.firstChild);
-
-    // This is the key fix. We set the initial maxHeight
-    // AFTER the content is fully built and added to the DOM.
-    content.style.maxHeight = content.scrollHeight + 'px';
 
     title.addEventListener('click', () => {
       title.classList.toggle('collapsed');
       const isCollapsed = title.classList.contains('collapsed');
       content.style.maxHeight = isCollapsed ? '0px' : (content.scrollHeight + 'px');
     });
+
+    return section;
+  }
+  
+  const summaryEl = buildSummaryViewer(data.config, data.config_changed);
+  if (summaryEl) {
+    W.appendChild(summaryEl);
+    const content = summaryEl.querySelector('.summary-container');
+    if (content) {
+      content.style.maxHeight = content.scrollHeight + 'px';
+    }
   }
 
-  buildSummaryViewer(data.config, data.config_changed);
-
-
-  /* ========================================================
-    CHART AND SECTION BUILDERS
-    ========================================================
-  */
+  const replChartContainerEl = buildReplStatusChartContainer(data.repl_timeline);
+  if (replChartContainerEl) {
+    W.appendChild(replChartContainerEl);
+    initReplStatusChart(replChartContainerEl, data.repl_timeline, data.labels);
+  }
 
   function stats(arr){
     const vals = (arr||[]).filter(v => typeof v === 'number' && !Number.isNaN(v));
@@ -268,6 +385,8 @@
     card.className = 'card';
     card.innerHTML = `<div class="pane"><div class="title">${title}</div><div class="chart"></div></div><div class="tablewrap"><div class="actions"><span class="chip">series</span><button class="btn" data-act="all">All</button><button class="btn" data-act="none">None</button><button class="btn" data-act="inverse">Inverse</button></div><table class="tbl"><thead><tr><th class="sortable asc" data-k="name">name</th><th class="sortable" data-k="min">min</th><th class="sortable" data-k="avg">avg</th><th class="sortable" data-k="max">max</th><th class="sortable" data-k="p95">p95</th></tr></thead><tbody></tbody></table></div>`;
     grid.appendChild(card);
+    
+    const chartLabels = L.map(ts => new Date(ts));
 
     const chart = echarts.init(card.querySelector('.chart'), 'light', {renderer:'canvas'});
     const palette = ['#2563eb','#16a34a','#f59e0b','#ef4444','#8b5cf6','#0ea5e9','#f97316','#22c55e','#e11d48','#10b981','#a855f7','#84cc16'];
@@ -275,7 +394,7 @@
     const series = seriesKeys.map((key, i) => {
       const displayName = getDisplayName(key, title);
       legendSelected[displayName] = true;
-      const arr = data.series[key] || Array(L.length).fill(null);
+      const arr = data.series[key] || Array(chartLabels.length).fill(null);
       return { name: displayName, key: key, type:'line', data: arr, smooth: true, showSymbol:false, lineStyle:{width:2}, emphasis:{focus:'series'}, connectNulls:false };
     });
 
@@ -283,7 +402,11 @@
       tooltip:{ trigger:'axis', confine:true, valueFormatter: (value) => fmt(value) + (unit ? ` ${unit}`: '') },
       color: palette, legend:{ show:false, selected: legendSelected },
       grid:{ left:55,right:25,top:40,bottom:36,containLabel:false },
-      xAxis:{ type:'category', data:L, axisLabel:{show:false}, axisTick:{show:false}, axisLine:{lineStyle:{color:'#cbd5e1'}} },
+      xAxis:{ type:'category', data: chartLabels, axisLabel:{ hideOverlap: true, formatter: (value) => {
+          const date = new Date(value);
+          return useDailyTimeFormat ? echarts.format.formatTime('MM-dd', date) : echarts.format.formatTime('HH:mm', date);
+        }
+      }},
       yAxis:{ type:'value', axisLine:{show:false}, splitLine:{lineStyle:{color:'#e5e7eb'}}, axisLabel: { formatter: (v) => fmt(v) } },
       series
     });
@@ -347,7 +470,7 @@
       });
     });
     window.addEventListener('resize', () => {
-        chart.resize();
+        document.querySelectorAll('.chart, .repl-chart').forEach(c => echarts.getInstanceByDom(c)?.resize());
         document.querySelectorAll('.sec-title:not(.collapsed) + .grid, .summary-container').forEach(grid => {
             if (grid.style.maxHeight !== '0px') {
                 grid.style.maxHeight = grid.scrollHeight + 'px';
@@ -356,11 +479,6 @@
     });
     return card;
   }
-
-  /* ========================================================
-    DEFINE ALL DASHBOARD SECTIONS AND CARDS
-    ========================================================
-  */
   
   const gMongo = buildSection('Mongo');
   buildCard(gMongo, 'Connections', ['connections_created_per_sec','connections_current','connections_available'], '');
