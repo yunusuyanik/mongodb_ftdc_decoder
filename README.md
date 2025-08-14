@@ -29,7 +29,6 @@ Open the printed URL (e.g., `http://127.0.0.1:<generatedport>/`) in your browser
 
 - **`metric_deltas.log`** – Metric delta values
 - **`ftdc_utilization.log`** – Utilization summary
-- **`web/`** – Dashboard static files included
 
 ---
 
