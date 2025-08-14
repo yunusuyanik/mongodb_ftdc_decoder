@@ -8,6 +8,7 @@
 ```bash
 git clone https://github.com/yunusuyanik/mongodb_ftdc_decoder.git
 cd mongodb_ftdc_decoder
+go mod init mongodb_ftdc_decoder
 go mod tidy
 go run main.go -dir /path/to/diagnostic.data
 ```
