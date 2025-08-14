@@ -60,6 +60,13 @@ type Point struct {
 	Metrics map[string]float64
 }
 
+// ReplStateChange represents a single state event for a replica set member.
+type ReplStateChange struct {
+	T     time.Time `json:"t"`
+	Name  string    `json:"name"`
+	State string    `json:"state"`
+}
+
 // ApiPayload is the main data structure sent to the
 // frontend. It contains all the necessary data
 // to build the dashboard.
@@ -67,6 +74,9 @@ type ApiPayload struct {
 	// General server information.
 	Hostname string `json:"hostname"`
 	Version  string `json:"version"`
+
+	// Replication timeline data.
+	ReplTimeline []ReplStateChange `json:"repl_timeline"`
 
 	// Static configuration snapshot and any detected changes.
 	Config        map[string]any `json:"config"`
@@ -109,9 +119,6 @@ func main() {
 
 	var deltaLogger, fullyDecodedLogger *log.Logger
 
-	// If the -genlogs flag is present, set up
-	// the log files. Otherwise, create loggers
-	// that discard all output.
 	if flagGenLogs {
 		timestamp := time.Now().Format("20060102_150405")
 		deltaLogFileName := fmt.Sprintf("metric_deltas_%s.log", timestamp)
@@ -119,7 +126,6 @@ func main() {
 
 		log.Printf("Log generation enabled. Creating log files with timestamp: %s", timestamp)
 
-		// Create the log file for metric deltas.
 		deltaLogFile, err := os.OpenFile(deltaLogFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 		if err != nil {
 			log.Fatalf("Delta log file could not be created: %v", err)
@@ -127,8 +133,6 @@ func main() {
 		defer deltaLogFile.Close()
 		deltaLogger = log.New(deltaLogFile, "", 0)
 
-		// Create the log file for the fully decoded,
-		// human-readable metric documents.
 		fullyDecodedFile, err := os.OpenFile(fullyDecodedFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 		if err != nil {
 			log.Fatalf("Fully decoded metrics log file could not be created: %v", err)
@@ -136,9 +140,6 @@ func main() {
 		defer fullyDecodedFile.Close()
 		fullyDecodedLogger = log.New(fullyDecodedFile, "", 0)
 	} else {
-		// Use io.Discard to create no-op loggers.
-		// This is an efficient way to disable logging
-		// without adding `if` checks everywhere.
 		deltaLogger = log.New(io.Discard, "", 0)
 		fullyDecodedLogger = log.New(io.Discard, "", 0)
 	}
@@ -147,7 +148,6 @@ func main() {
 		log.Fatal("set -dir to the diagnostic.data folder")
 	}
 
-	// Find all the metrics.* files to process.
 	files, err := findMetricFiles(flagDir)
 	if err != nil {
 		log.Fatal(err)
@@ -156,8 +156,7 @@ func main() {
 		log.Fatalf("no metrics.* files found under %s", flagDir)
 	}
 
-	// This is the main data extraction and processing function.
-	points, host, version, allStepDeltas, configSnaps, err := extractAll(files, fullyDecodedLogger)
+	points, host, version, replTimeline, allStepDeltas, configSnaps, err := extractAll(files, fullyDecodedLogger)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -165,7 +164,6 @@ func main() {
 		log.Fatal("no points extracted (could not parse timestamp/metrics)")
 	}
 
-	// If logging is enabled, write the delta log file.
 	if flagGenLogs {
 		log.Println("Writing metric deltas...")
 		for _, step := range allStepDeltas {
@@ -181,35 +179,27 @@ func main() {
 		log.Println("Finished writing deltas.")
 	}
 
-	// Initialize the main payload to be sent to the frontend.
-	payload := &ApiPayload{Hostname: host, Version: version}
+	payload := &ApiPayload{Hostname: host, Version: version, ReplTimeline: replTimeline}
 
-	// Process the configuration snapshots.
 	if len(configSnaps) > 0 {
-		// Use the last snapshot for display.
 		payload.Config = configSnaps[len(configSnaps)-1]
-		// If there is more than one, compare the last two
-		// to see if the configuration has changed.
 		if len(configSnaps) > 1 {
 			prevConf := configSnaps[len(configSnaps)-2]
 			currConf := configSnaps[len(configSnaps)-1]
-
 			prevParsed, _ := getNestedValue(prevConf, "getCmdLineOpts.parsed")
 			currParsed, _ := getNestedValue(currConf, "getCmdLineOpts.parsed")
-
 			if !reflect.DeepEqual(prevParsed, currParsed) {
 				payload.ConfigChanged = true
 			}
 		}
 	}
 
-	// Prepare the time series data for the UI charts.
 	sort.Slice(points, func(i, j int) bool { return points[i].T.Before(points[j].T) })
 	labels := make([]string, len(points))
 	series := map[string][]float64{}
 	seen := map[string]struct{}{}
 	for i, p := range points {
-		labels[i] = p.T.Format("2006-01-02 15:04")
+		labels[i] = p.T.Format(time.RFC3339)
 		for k, v := range p.Metrics {
 			if _, ok := series[k]; !ok {
 				series[k] = make([]float64, len(points))
@@ -229,16 +219,12 @@ func main() {
 	}
 	payload.Labels, payload.Series, payload.Keys, payload.Groups = labels, series, keys, groups
 
-	// Set up the HTTP server.
-	// The API endpoint provides the JSON data.
 	http.HandleFunc("/api/data", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(payload)
 	})
-	// The root serves the static web files.
 	http.Handle("/", http.FileServer(http.Dir(flagWebDir)))
 
-	// Start listening on a random available port.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		log.Fatal(err)
@@ -246,18 +232,15 @@ func main() {
 	url := "http://" + ln.Addr().String() + "/"
 	log.Printf("Dashboard: %s", url)
 
-	// Start the server in a goroutine.
 	go func() {
 		if err := http.Serve(ln, nil); err != nil {
 			log.Fatal(err)
 		}
 	}()
-	// On macOS, automatically open the URL in the default browser.
 	if runtime.GOOS == "darwin" {
 		_ = exec.Command("open", url).Start()
 	}
 
-	// Block forever so the server keeps running.
 	select {}
 }
 
@@ -266,58 +249,48 @@ func main() {
    ========================================================
 */
 
-// extractAll is the core function that reads metrics files,
-// decodes them, and processes the data.
-func extractAll(files []string, decodedLogger *log.Logger) ([]Point, string, string, []StepDelta, []map[string]any, error) {
+func extractAll(files []string, decodedLogger *log.Logger) ([]Point, string, string, []ReplStateChange, []StepDelta, []map[string]any, error) {
 	var out []Point
 	var host, version string
 	var prev Point
 	var prevBsonM bson.M
 	var allStepDeltas []StepDelta
 	var configSnaps []map[string]any
+	var replTimeline []ReplStateChange
 
-	// Process each metrics file in chronological order.
 	for _, f := range files {
 		dbg("bsondump %s", filepath.Base(f))
 
-		// Use the `bsondump` tool to convert the FTDC
-		// file into a stream of JSON documents.
 		cmd := exec.Command("bsondump", "--quiet", f)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			return nil, "", "", nil, nil, err
+			return nil, "", "", nil, nil, nil, err
 		}
 		if err := cmd.Start(); err != nil {
-			return nil, "", "", nil, nil, err
+			return nil, "", "", nil, nil, nil, err
 		}
 
 		dec := json.NewDecoder(stdout)
 
-		// Decode the JSON stream document by document.
 		for {
 			var obj map[string]any
 			if err := dec.Decode(&obj); err != nil {
 				if err == io.EOF {
 					break
 				}
-				return nil, "", "", nil, nil, err
+				return nil, "", "", nil, nil, nil, err
 			}
 
-			// Check if the document is a main data block (type 1)
-			// or a static configuration document.
 			isDataBlock := getNum(obj["type"]) == 1
 			isConfigBlock := hasKey(obj, "doc.buildInfo") || hasKey(obj, "doc.hostInfo")
 
 			if isConfigBlock {
-				// If it's a config document, add it to our slice of snapshots.
 				if doc, ok := obj["doc"].(map[string]any); ok {
 					configSnaps = append(configSnaps, doc)
 				}
 			}
 
 			if isDataBlock {
-				// This is the main data block, which is a
-				// base64-encoded, zlib-compressed BSON blob.
 				b64 := extractBase64(obj)
 				if b64 == "" {
 					continue
@@ -336,16 +309,12 @@ func extractAll(files []string, decodedLogger *log.Logger) ([]Point, string, str
 					continue
 				}
 
-				// The inflated data can contain multiple BSON documents
-				// concatenated together. We split them here.
 				for _, bs := range splitConcatBSON(inflated) {
 					var m bson.M
 					if err := bson.Unmarshal(bs, &m); err != nil {
 						continue
 					}
 
-					// If logging is enabled, write the fully decoded,
-					// human-readable JSON to its log file.
 					jsonBytes, err := json.MarshalIndent(m, "", "  ")
 					if err == nil {
 						decodedLogger.Println(string(jsonBytes))
@@ -357,8 +326,22 @@ func extractAll(files []string, decodedLogger *log.Logger) ([]Point, string, str
 						continue
 					}
 
-					// If we have a previous metric snapshot, we can
-					// calculate the deltas for this time step.
+					if replStatus, ok := getMap(m, "replSetGetStatus"); ok {
+						if members, ok := getNestedValue(replStatus, "members"); ok {
+							if membersSlice, ok := members.(primitive.A); ok {
+								for _, memberVal := range membersSlice {
+									if memberMap, ok := toMap(memberVal); ok {
+										name, nameOk := getNestedString(memberMap, "name")
+										state, stateOk := getNestedString(memberMap, "stateStr")
+										if nameOk && stateOk {
+											replTimeline = append(replTimeline, ReplStateChange{T: ts, Name: name, State: state})
+										}
+									}
+								}
+							}
+						}
+					}
+
 					if prevBsonM != nil {
 						stepDeltas := calculateDeltas(m, prevBsonM)
 						if len(stepDeltas) > 0 {
@@ -367,7 +350,6 @@ func extractAll(files []string, decodedLogger *log.Logger) ([]Point, string, str
 					}
 					prevBsonM = m
 
-					// Discover the hostname and version on the first pass.
 					if host == "" {
 						if h, ok := getNestedString(m, "serverStatus.host"); ok {
 							host = h
@@ -379,13 +361,11 @@ func extractAll(files []string, decodedLogger *log.Logger) ([]Point, string, str
 						}
 					}
 
-					// Collect raw metrics for the UI dashboard.
 					rm := collectRaw(m)
 					if len(rm) == 0 {
 						continue
 					}
 
-					// Calculate final rates and percentages for the UI.
 					cur := Point{T: ts, Metrics: rm}
 					if prev.T.IsZero() {
 						prev = cur
@@ -402,8 +382,6 @@ func extractAll(files []string, decodedLogger *log.Logger) ([]Point, string, str
 					prev = cur
 				}
 			} else {
-				// If it's not a data block, it might be a direct
-				// document like systemMetrics. Log it as is.
 				jsonBytes, err := json.MarshalIndent(obj, "", "  ")
 				if err == nil {
 					decodedLogger.Println(string(jsonBytes))
@@ -416,7 +394,7 @@ func extractAll(files []string, decodedLogger *log.Logger) ([]Point, string, str
 	if host == "" {
 		host = "unknown_host"
 	}
-	return out, host, version, allStepDeltas, configSnaps, nil
+	return out, host, version, replTimeline, allStepDeltas, configSnaps, nil
 }
 
 // ... The rest of the helper functions remain unchanged in functionality ...
@@ -1068,6 +1046,13 @@ func getNestedValue(m map[string]any, key string) (any, bool) {
 				return nil, false
 			}
 			cur = v
+		case primitive.A: // Handle BSON array
+			curArr := []any(node)
+			idx, err := strconv.Atoi(p)
+			if err != nil || idx < 0 || idx >= len(curArr) {
+				return nil, false
+			}
+			cur = curArr[idx]
 		case primitive.D:
 			found := false
 			for _, e := range node {
