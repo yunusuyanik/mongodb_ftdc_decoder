@@ -9,31 +9,43 @@
 git clone https://github.com/yunusuyanik/mongodb_ftdc_decoder.git
 cd mongodb_ftdc_decoder
 go mod tidy
-go run main.go -dir /path/to/diagnostic.data```
+go run main.go -dir /path/to/diagnostic.data
+```
 
+Open the printed URL (e.g., `http://127.0.0.1:<generatedport>/`) in your browser.
 
-Open the printed URL (e.g., http://127.0.0.1:<generatedport>/) in your browser.
+---
 
-⚙️ Flags
-Flag	Description
--dir	Required. Path to diagnostic.data
--debug	Print verbose logs
+## ⚙️ Flags
 
-📄 Output Files
+| Flag     | Description                          |
+|----------|--------------------------------------|
+| `-dir`   | **Required.** Path to `diagnostic.data` |
+| `-debug` | Print verbose logs                   |
 
-metric_deltas.log – Metric delta values
-ftdc_utilization.log – Utilization summary
+---
 
-web/ – Dashboard static files included
+## 📄 Output Files
 
-📂 Project Layout
+- **`metric_deltas.log`** – Metric delta values
+- **`ftdc_utilization.log`** – Utilization summary
+- **`web/`** – Dashboard static files included
+
+---
+
+## 📂 Project Layout
+```
 ftdc_dashboard/
 ├─ main.go
 ├─ go.mod
 ├─ go.sum
 ├─ web/
+└─ web/index.html
+```
 
-💡 Tips
+---
 
-Ensure -dir points to the folder containing metrics.* files.
-Use -debug to get detailed logs for troubleshooting.
+## 💡 Tips
+
+- Ensure `-dir` points to the folder containing `metrics.*` files.
+- Use `-debug` to get detailed logs for troubleshooting.
