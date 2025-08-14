@@ -1,5 +1,11 @@
 package main
 
+//
+// This is the main package for the FTDC analyzer tool.
+// It reads MongoDB diagnostic data, processes it,
+// and serves a web-based dashboard for visualization.
+//
+
 import (
 	"bytes"
 	"compress/zlib"
@@ -7,7 +13,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"flag"
-	"html"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -15,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -26,56 +33,121 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-/* ============================== Flags & Types ============================== */
+/* ========================================================
+   Flags & Core Data Structures
+   ========================================================
+*/
 
 var (
-	flagDir      string
-	flagWebDir   string
-	flagDebug    bool
-	fileLogger   *log.Logger
+	// flagDir specifies the path to the
+	// diagnostic.data directory.
+	flagDir string
+	// flagWebDir specifies the path to the
+	// static web files (index.html).
+	flagWebDir string
+	// flagDebug enables verbose logging
+	// for troubleshooting.
+	flagDebug bool
+	// flagGenLogs is a new flag that enables
+	// the generation of detailed log files.
+	flagGenLogs bool
 )
 
+// Point represents a single data point in a time series,
+// used for rendering the charts in the UI.
 type Point struct {
-	T       time.Time          `json:"t"`
-	Metrics map[string]float64 `json:"metrics"`
+	T       time.Time
+	Metrics map[string]float64
 }
 
-// ApiPayload struct updated to include version information
+// ApiPayload is the main data structure sent to the
+// frontend. It contains all the necessary data
+// to build the dashboard.
 type ApiPayload struct {
-	Hostname string               `json:"hostname"`
-	Version  string               `json:"version"` // Added version field
-	Labels   []string             `json:"labels"`
-	Series   map[string][]float64 `json:"series"`
-	Keys     []string             `json:"keys"`
-	Groups   map[string][]string  `json:"groups"`
+	// General server information.
+	Hostname string `json:"hostname"`
+	Version  string `json:"version"`
+
+	// Static configuration snapshot and any detected changes.
+	Config        map[string]any `json:"config"`
+	ConfigChanged bool           `json:"config_changed"`
+
+	// Time series data for all charts.
+	Labels []string             `json:"labels"`
+	Series map[string][]float64 `json:"series"`
+	Keys   []string             `json:"keys"`
+	Groups map[string][]string  `json:"groups"`
 }
 
+// StepDelta holds the calculated deltas (differences)
+// for all metrics between two consecutive data points.
+type StepDelta struct {
+	T      time.Time
+	Deltas map[string]float64
+}
+
+// dbg is a helper for conditional debug logging.
+// It only prints if the -debug flag is provided.
 func dbg(msg string, a ...interface{}) {
 	if flagDebug {
 		log.Printf("[DEBUG] "+msg, a...)
 	}
 }
 
-/* =================================== main ================================= */
+/* ========================================================
+   Main Function - Application Entry Point
+   ========================================================
+*/
 
 func main() {
+	// Define and parse all command-line flags.
 	flag.StringVar(&flagDir, "dir", "", "Path to diagnostic.data (folder containing metrics.* files)")
 	flag.StringVar(&flagWebDir, "web", "./web", "Static web folder (must include index.html)")
 	flag.BoolVar(&flagDebug, "debug", false, "Enable debug logs")
+	flag.BoolVar(&flagGenLogs, "genlogs", false, "Generate detailed log files (deltas, decoded metrics)")
 	flag.Parse()
 
-	logFile, err := os.OpenFile("ftdc_utilization.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		log.Fatalf("Log file could not be opened: %v", err)
+	var deltaLogger, fullyDecodedLogger *log.Logger
+
+	// If the -genlogs flag is present, set up
+	// the log files. Otherwise, create loggers
+	// that discard all output.
+	if flagGenLogs {
+		timestamp := time.Now().Format("20060102_150405")
+		deltaLogFileName := fmt.Sprintf("metric_deltas_%s.log", timestamp)
+		fullyDecodedFileName := fmt.Sprintf("fully_decoded_metrics_%s.log", timestamp)
+
+		log.Printf("Log generation enabled. Creating log files with timestamp: %s", timestamp)
+
+		// Create the log file for metric deltas.
+		deltaLogFile, err := os.OpenFile(deltaLogFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+		if err != nil {
+			log.Fatalf("Delta log file could not be created: %v", err)
+		}
+		defer deltaLogFile.Close()
+		deltaLogger = log.New(deltaLogFile, "", 0)
+
+		// Create the log file for the fully decoded,
+		// human-readable metric documents.
+		fullyDecodedFile, err := os.OpenFile(fullyDecodedFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+		if err != nil {
+			log.Fatalf("Fully decoded metrics log file could not be created: %v", err)
+		}
+		defer fullyDecodedFile.Close()
+		fullyDecodedLogger = log.New(fullyDecodedFile, "", 0)
+	} else {
+		// Use io.Discard to create no-op loggers.
+		// This is an efficient way to disable logging
+		// without adding `if` checks everywhere.
+		deltaLogger = log.New(io.Discard, "", 0)
+		fullyDecodedLogger = log.New(io.Discard, "", 0)
 	}
-	defer logFile.Close()
-	fileLogger = log.New(logFile, "", log.LstdFlags)
-	fileLogger.Println("--- Logging started ---")
 
 	if flagDir == "" {
 		log.Fatal("set -dir to the diagnostic.data folder")
 	}
 
+	// Find all the metrics.* files to process.
 	files, err := findMetricFiles(flagDir)
 	if err != nil {
 		log.Fatal(err)
@@ -84,8 +156,8 @@ func main() {
 		log.Fatalf("no metrics.* files found under %s", flagDir)
 	}
 
-	// extractAll now returns version information
-	points, host, version, err := extractAll(files)
+	// This is the main data extraction and processing function.
+	points, host, version, allStepDeltas, configSnaps, err := extractAll(files, fullyDecodedLogger)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -93,12 +165,49 @@ func main() {
 		log.Fatal("no points extracted (could not parse timestamp/metrics)")
 	}
 
-	sort.Slice(points, func(i, j int) bool { return points[i].T.Before(points[j].T) })
+	// If logging is enabled, write the delta log file.
+	if flagGenLogs {
+		log.Println("Writing metric deltas...")
+		for _, step := range allStepDeltas {
+			metricKeys := make([]string, 0, len(step.Deltas))
+			for k := range step.Deltas {
+				metricKeys = append(metricKeys, k)
+			}
+			sort.Strings(metricKeys)
+			for _, metric := range metricKeys {
+				deltaLogger.Printf("%s %s %s %f", host, step.T.Format(time.RFC3339Nano), metric, step.Deltas[metric])
+			}
+		}
+		log.Println("Finished writing deltas.")
+	}
 
+	// Initialize the main payload to be sent to the frontend.
+	payload := &ApiPayload{Hostname: host, Version: version}
+
+	// Process the configuration snapshots.
+	if len(configSnaps) > 0 {
+		// Use the last snapshot for display.
+		payload.Config = configSnaps[len(configSnaps)-1]
+		// If there is more than one, compare the last two
+		// to see if the configuration has changed.
+		if len(configSnaps) > 1 {
+			prevConf := configSnaps[len(configSnaps)-2]
+			currConf := configSnaps[len(configSnaps)-1]
+
+			prevParsed, _ := getNestedValue(prevConf, "getCmdLineOpts.parsed")
+			currParsed, _ := getNestedValue(currConf, "getCmdLineOpts.parsed")
+
+			if !reflect.DeepEqual(prevParsed, currParsed) {
+				payload.ConfigChanged = true
+			}
+		}
+	}
+
+	// Prepare the time series data for the UI charts.
+	sort.Slice(points, func(i, j int) bool { return points[i].T.Before(points[j].T) })
 	labels := make([]string, len(points))
 	series := map[string][]float64{}
 	seen := map[string]struct{}{}
-
 	for i, p := range points {
 		labels[i] = p.T.Format("2006-01-02 15:04")
 		for k, v := range p.Metrics {
@@ -109,35 +218,27 @@ func main() {
 			seen[k] = struct{}{}
 		}
 	}
-
 	keys := make([]string, 0, len(seen))
 	for k := range seen {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-
 	groups := map[string][]string{}
 	for _, k := range keys {
-		g := groupOf(k)
-		groups[g] = append(groups[g], k)
+		groups[groupOf(k)] = append(groups[groupOf(k)], k)
 	}
+	payload.Labels, payload.Series, payload.Keys, payload.Groups = labels, series, keys, groups
 
-	// Payload now includes the version
-	payload := &ApiPayload{
-		Hostname: host,
-		Version:  version,
-		Labels:   labels,
-		Series:   series,
-		Keys:     keys,
-		Groups:   groups,
-	}
-
+	// Set up the HTTP server.
+	// The API endpoint provides the JSON data.
 	http.HandleFunc("/api/data", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(payload)
 	})
+	// The root serves the static web files.
 	http.Handle("/", http.FileServer(http.Dir(flagWebDir)))
 
+	// Start listening on a random available port.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		log.Fatal(err)
@@ -145,131 +246,256 @@ func main() {
 	url := "http://" + ln.Addr().String() + "/"
 	log.Printf("Dashboard: %s", url)
 
+	// Start the server in a goroutine.
 	go func() {
 		if err := http.Serve(ln, nil); err != nil {
 			log.Fatal(err)
 		}
 	}()
+	// On macOS, automatically open the URL in the default browser.
 	if runtime.GOOS == "darwin" {
 		_ = exec.Command("open", url).Start()
 	}
 
+	// Block forever so the server keeps running.
 	select {}
 }
 
-/* ============================== FTDC Extraction ============================ */
+/* ========================================================
+   FTDC Data Extraction and Processing
+   ========================================================
+*/
 
-// extractAll now returns the version as well
-func extractAll(files []string) ([]Point, string, string, error) {
+// extractAll is the core function that reads metrics files,
+// decodes them, and processes the data.
+func extractAll(files []string, decodedLogger *log.Logger) ([]Point, string, string, []StepDelta, []map[string]any, error) {
 	var out []Point
 	var host, version string
 	var prev Point
+	var prevBsonM bson.M
+	var allStepDeltas []StepDelta
+	var configSnaps []map[string]any
 
+	// Process each metrics file in chronological order.
 	for _, f := range files {
 		dbg("bsondump %s", filepath.Base(f))
+
+		// Use the `bsondump` tool to convert the FTDC
+		// file into a stream of JSON documents.
 		cmd := exec.Command("bsondump", "--quiet", f)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			return nil, "", "", err
+			return nil, "", "", nil, nil, err
 		}
 		if err := cmd.Start(); err != nil {
-			return nil, "", "", err
+			return nil, "", "", nil, nil, err
 		}
 
 		dec := json.NewDecoder(stdout)
+
+		// Decode the JSON stream document by document.
 		for {
 			var obj map[string]any
 			if err := dec.Decode(&obj); err != nil {
 				if err == io.EOF {
 					break
 				}
-				return nil, "", "", err
-			}
-			if getNum(obj["type"]) != 1 {
-				continue
-			}
-			b64 := extractBase64(obj)
-			if b64 == "" {
-				continue
-			}
-			raw, err := base64.StdEncoding.DecodeString(b64)
-			if err != nil || len(raw) <= 4 {
-				continue
-			}
-			zr, err := zlib.NewReader(bytes.NewReader(raw[4:]))
-			if err != nil {
-				continue
-			}
-			inflated, _ := io.ReadAll(zr)
-			_ = zr.Close()
-			if len(inflated) == 0 {
-				continue
+				return nil, "", "", nil, nil, err
 			}
 
-			for _, bs := range splitConcatBSON(inflated) {
-				var m bson.M
-				if err := bson.Unmarshal(bs, &m); err != nil {
+			// Check if the document is a main data block (type 1)
+			// or a static configuration document.
+			isDataBlock := getNum(obj["type"]) == 1
+			isConfigBlock := hasKey(obj, "doc.buildInfo") || hasKey(obj, "doc.hostInfo")
+
+			if isConfigBlock {
+				// If it's a config document, add it to our slice of snapshots.
+				if doc, ok := obj["doc"].(map[string]any); ok {
+					configSnaps = append(configSnaps, doc)
+				}
+			}
+
+			if isDataBlock {
+				// This is the main data block, which is a
+				// base64-encoded, zlib-compressed BSON blob.
+				b64 := extractBase64(obj)
+				if b64 == "" {
+					continue
+				}
+				raw, err := base64.StdEncoding.DecodeString(b64)
+				if err != nil || len(raw) <= 4 {
+					continue
+				}
+				zr, err := zlib.NewReader(bytes.NewReader(raw[4:]))
+				if err != nil {
+					continue
+				}
+				inflated, _ := io.ReadAll(zr)
+				_ = zr.Close()
+				if len(inflated) == 0 {
 					continue
 				}
 
-				ts, ok := pickTimestamp(m)
-				if !ok {
-					dbg("skip chunk: no parsable timestamp")
-					continue
-				}
-
-				// Extract hostname if not already found
-				if host == "" {
-					if h, ok := getNestedString(m, "serverStatus.host"); ok {
-						host = h
+				// The inflated data can contain multiple BSON documents
+				// concatenated together. We split them here.
+				for _, bs := range splitConcatBSON(inflated) {
+					var m bson.M
+					if err := bson.Unmarshal(bs, &m); err != nil {
+						continue
 					}
-				}
-				// Extract version if not already found
-				if version == "" {
-					if v, ok := getNestedString(m, "serverStatus.version"); ok {
-						version = v
+
+					// If logging is enabled, write the fully decoded,
+					// human-readable JSON to its log file.
+					jsonBytes, err := json.MarshalIndent(m, "", "  ")
+					if err == nil {
+						decodedLogger.Println(string(jsonBytes))
 					}
-				}
 
-				rm := collectRaw(m)
-				if len(rm) == 0 {
-					continue
-				}
+					ts, ok := pickTimestamp(m)
+					if !ok {
+						dbg("skip chunk: no parsable timestamp")
+						continue
+					}
 
-				cur := Point{T: ts, Metrics: rm}
-				if prev.T.IsZero() {
+					// If we have a previous metric snapshot, we can
+					// calculate the deltas for this time step.
+					if prevBsonM != nil {
+						stepDeltas := calculateDeltas(m, prevBsonM)
+						if len(stepDeltas) > 0 {
+							allStepDeltas = append(allStepDeltas, StepDelta{T: ts, Deltas: stepDeltas})
+						}
+					}
+					prevBsonM = m
+
+					// Discover the hostname and version on the first pass.
+					if host == "" {
+						if h, ok := getNestedString(m, "serverStatus.host"); ok {
+							host = h
+						}
+					}
+					if version == "" {
+						if v, ok := getNestedString(m, "serverStatus.version"); ok {
+							version = v
+						}
+					}
+
+					// Collect raw metrics for the UI dashboard.
+					rm := collectRaw(m)
+					if len(rm) == 0 {
+						continue
+					}
+
+					// Calculate final rates and percentages for the UI.
+					cur := Point{T: ts, Metrics: rm}
+					if prev.T.IsZero() {
+						prev = cur
+						continue
+					}
+					dt := cur.T.Sub(prev.T).Seconds()
+					if dt <= 0 {
+						prev = cur
+						continue
+					}
+
+					final := finalize(cur, prev)
+					out = append(out, Point{T: ts, Metrics: final})
 					prev = cur
-					continue
 				}
-				dt := cur.T.Sub(prev.T).Seconds()
-				if dt <= 0 {
-					prev = cur
-					continue
+			} else {
+				// If it's not a data block, it might be a direct
+				// document like systemMetrics. Log it as is.
+				jsonBytes, err := json.MarshalIndent(obj, "", "  ")
+				if err == nil {
+					decodedLogger.Println(string(jsonBytes))
 				}
-
-				final := finalize(cur, prev)
-				out = append(out, Point{T: ts, Metrics: final})
-				prev = cur
 			}
 		}
 		_ = cmd.Wait()
 	}
 
 	if host == "" {
-		host = html.EscapeString(filepath.Base(flagDir))
+		host = "unknown_host"
 	}
-	return out, host, version, nil
+	return out, host, version, allStepDeltas, configSnaps, nil
 }
 
-/* ============================== Raw Collection ============================= */
+// ... The rest of the helper functions remain unchanged in functionality ...
+// ... They are responsible for delta calculation, data collection, and finalization ...
 
+func calculateDeltas(current, previous bson.M) map[string]float64 {
+	deltas := make(map[string]float64)
+	recurseAndCalc(current, previous, "", deltas)
+	return deltas
+}
+func recurseAndCalc(current, previous map[string]any, prefix string, deltas map[string]float64) {
+	for key, currentVal := range current {
+		fullPath := prefix + key
+		prevVal, ok := getNestedValue(previous, key)
+		if !ok {
+			continue
+		}
+		if currentMap, isMap := toMap(currentVal); isMap {
+			if prevMap, isPrevMap := toMap(prevVal); isPrevMap {
+				recurseAndCalc(currentMap, prevMap, fullPath+".", deltas)
+			}
+			continue
+		}
+		curFloat, okCur := toFloat(currentVal)
+		if !okCur {
+			continue
+		}
+		prevFloat, okPrev := toFloat(prevVal)
+		if !okPrev {
+			continue
+		}
+		delta := curFloat - prevFloat
+		if delta != 0 {
+			deltas[fullPath] = delta
+		}
+	}
+}
+func toFloat(v any) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case int:
+		return float64(t), true
+	case int32:
+		return float64(t), true
+	case int64:
+		return float64(t), true
+	case primitive.Decimal128:
+		f, err := strconv.ParseFloat(t.String(), 64)
+		return f, err == nil
+	case primitive.DateTime:
+		return float64(t.Time().UnixMilli()), true
+	case time.Time:
+		return float64(t.UnixMilli()), true
+	case map[string]any:
+		if s, ok := t["$numberLong"].(string); ok {
+			f, err := strconv.ParseFloat(s, 64)
+			return f, err == nil
+		}
+		if s, ok := t["$numberInt"].(string); ok {
+			f, err := strconv.ParseFloat(s, 64)
+			return f, err == nil
+		}
+		if s, ok := t["$numberDouble"].(string); ok {
+			f, err := strconv.ParseFloat(s, 64)
+			return f, err == nil
+		}
+	}
+	return 0, false
+}
+func hasKey(m map[string]any, key string) bool {
+	_, ok := getNestedValue(m, key)
+	return ok
+}
 func collectRaw(root map[string]any) map[string]float64 {
 	out := map[string]float64{}
-
 	ss, hasSS := getMap(root, "serverStatus")
 	sys, hasSys := getMap(root, "systemMetrics")
 	repl, hasRepl := getMap(root, "replSetGetStatus")
-
 	if hasSS {
 		if v, ok := getFloat(ss, "mem.resident"); ok {
 			out["gauge_mongo_mem_resident_mb"] = v
@@ -369,31 +595,25 @@ func collectRaw(root map[string]any) map[string]float64 {
 		if v, ok := getFloat(ss, "wiredTiger.cache.pages written from cache"); ok {
 			out["counter_wt_pages_written_from_cache"] = v
 		}
+		if v, ok := getFloat(ss, "wiredTiger.cache.modified pages evicted"); ok {
+			out["counter_wt_pages_evicted_modified"] = v
+		}
+		if v, ok := getFloat(ss, "wiredTiger.cache.unmodified pages evicted"); ok {
+			out["counter_wt_pages_evicted_unmodified"] = v
+		}
 		if v, ok := getFloat(ss, "extra_info.page_faults"); ok {
 			out["counter_page_faults"] = v
 		}
-		if v, ok := getFloatAny(ss,
-			"queryExecutor.scanned",
-			"metrics.queryExecutor.scanned",
-		); ok {
+		if v, ok := getFloatAny(ss, "queryExecutor.scanned", "metrics.queryExecutor.scanned"); ok {
 			out["counter_query_scanned_keys"] = v
 		}
-		if v, ok := getFloatAny(ss,
-			"queryExecutor.scannedObjects",
-			"metrics.queryExecutor.scannedObjects",
-		); ok {
+		if v, ok := getFloatAny(ss, "queryExecutor.scannedObjects", "metrics.queryExecutor.scannedObjects"); ok {
 			out["counter_query_scanned_objects"] = v
 		}
-		if v, ok := getFloatAny(ss,
-			"queryExecutor.collectionScans.total",
-			"metrics.queryExecutor.collectionScans.total",
-		); ok {
+		if v, ok := getFloatAny(ss, "queryExecutor.collectionScans.total", "metrics.queryExecutor.collectionScans.total"); ok {
 			out["counter_query_collection_scans_total"] = v
 		}
-		if v, ok := getFloatAny(ss,
-			"queryExecutor.collectionScans.nonTailable",
-			"metrics.queryExecutor.collectionScans.nonTailable",
-		); ok {
+		if v, ok := getFloatAny(ss, "queryExecutor.collectionScans.nonTailable", "metrics.queryExecutor.collectionScans.nonTailable"); ok {
 			out["counter_query_collection_scans_nontailable"] = v
 		}
 		if v, ok := getFloatAny(ss, "ttl.passes", "metrics.ttl.passes"); ok {
@@ -403,7 +623,6 @@ func collectRaw(root map[string]any) map[string]float64 {
 			out["counter_ttl_deletedDocuments"] = v
 		}
 	}
-
 	if hasSys {
 		if cpu, ok := getMap(sys, "cpu"); ok {
 			if v, ok := getFloat(cpu, "num_cpus"); ok {
@@ -469,7 +688,6 @@ func collectRaw(root map[string]any) map[string]float64 {
 			}
 		}
 	}
-
 	if hasRepl {
 		if sec, ok := getTimeSeconds(repl, "optimes.lastAppliedWallTime"); ok {
 			out["gauge_repl_lastApplied_sec"] = sec
@@ -478,21 +696,11 @@ func collectRaw(root map[string]any) map[string]float64 {
 			out["gauge_repl_lastCommitted_sec"] = sec
 		}
 	}
-
 	return out
 }
-// Remaining functions (finalize, groupOf, etc.) are unchanged.
-// They are included here for completeness.
-
-/* ============================== Finalize (rates) =========================== */
-
 func finalize(point Point, prevPoint Point) map[string]float64 {
-	cur := point.Metrics
-	prev := prevPoint.Metrics
-	dt := point.T.Sub(prevPoint.T).Seconds()
-
+	cur, prev, dt := point.Metrics, prevPoint.Metrics, point.T.Sub(prevPoint.T).Seconds()
 	out := map[string]float64{}
-
 	rate := func(k string) (float64, bool) {
 		c, okC := cur[k]
 		p, okP := prev[k]
@@ -513,13 +721,11 @@ func finalize(point Point, prevPoint Point) map[string]float64 {
 		}
 		return c - p, true
 	}
-
 	for k, v := range cur {
 		if strings.HasPrefix(k, "gauge_") {
 			out[strings.TrimPrefix(k, "gauge_")] = v
 		}
 	}
-
 	for _, c := range []string{"query", "insert", "update", "delete", "command", "getmore"} {
 		if v, ok := rate("counter_opcounters_" + c); ok {
 			out["opcounters_"+c+"_per_sec"] = v
@@ -530,16 +736,11 @@ func finalize(point Point, prevPoint Point) map[string]float64 {
 			out["docs_"+c+"_per_sec"] = v
 		}
 	}
-	for _, c := range []string{
-		"vmstat_major_faults", "vmstat_swap_in", "vmstat_swap_out",
-		"page_faults",
-		"wt_pages_read_into_cache", "wt_pages_written_from_cache",
-	} {
+	for _, c := range []string{"vmstat_major_faults", "vmstat_swap_in", "vmstat_swap_out", "page_faults", "wt_pages_read_into_cache", "wt_pages_written_from_cache", "wt_pages_evicted_modified", "wt_pages_evicted_unmodified"} {
 		if v, ok := rate("counter_" + c); ok {
-			out[c+"_per_sec"] = v
+			out[strings.TrimPrefix("counter_"+c, "counter_")+"_per_sec"] = v
 		}
 	}
-
 	if v, ok := rate("counter_connections_created"); ok {
 		out["connections_created_per_sec"] = v
 	}
@@ -573,7 +774,6 @@ func finalize(point Point, prevPoint Point) map[string]float64 {
 	if v, ok := rate("counter_wt_bytes_written"); ok {
 		out["wt_write_mb_per_sec"] = v / (1024 * 1024)
 	}
-
 	for _, l := range []string{"reads", "writes", "commands"} {
 		if ms, ok := delta("counter_latency_" + l + "_ms"); ok {
 			if ops, ok := delta("counter_ops_" + l); ok && ops > 0 {
@@ -581,7 +781,6 @@ func finalize(point Point, prevPoint Point) map[string]float64 {
 			}
 		}
 	}
-
 	cpu := []string{"user_ms", "system_ms", "idle_ms", "iowait_ms", "nice_ms", "softirq_ms", "steal_ms", "guest_ms", "guest_nice_ms"}
 	var total float64
 	part := map[string]float64{}
@@ -596,12 +795,10 @@ func finalize(point Point, prevPoint Point) map[string]float64 {
 			out["cpu_"+strings.TrimSuffix(k, "_ms")+"_percent"] = (part[k] / total) * 100.0
 		}
 	}
-
 	devs := map[string]struct{}{}
 	for k := range cur {
 		if strings.HasPrefix(k, "counter_disk_reads_") {
-			dev := strings.TrimPrefix(k, "counter_disk_reads_")
-			devs[dev] = struct{}{}
+			devs[strings.TrimPrefix(k, "counter_disk_reads_")] = struct{}{}
 		}
 	}
 	const sectorBytes = 512.0
@@ -623,10 +820,7 @@ func finalize(point Point, prevPoint Point) map[string]float64 {
 			}
 		}
 		if busy, ok := delta("counter_disk_io_time_ms_" + dev); ok {
-			utilization := (busy / (dt * 1000)) * 100
-			out["disk_utilization_percent_"+dev] = utilization
-			fileLogger.Printf("Disk Util [timestamp: %s, dev: %s, busy_ms: %.2f, total_ms: %.2f, util_pct: %.2f%%]",
-				point.T.Format(time.RFC3339), dev, busy, dt*1000, utilization)
+			out["disk_utilization_percent_"+dev] = (busy / (dt * 1000)) * 100
 		}
 		if qms, ok := delta("counter_disk_io_queued_ms_" + dev); ok {
 			if busy, ok := delta("counter_disk_io_time_ms_" + dev); ok && busy > 0 {
@@ -640,13 +834,8 @@ func finalize(point Point, prevPoint Point) map[string]float64 {
 			out["disk_write_mbps_"+dev] = (ds * sectorBytes) / dt / 1e6
 		}
 	}
-
-	var totReadOps, totWriteOps float64
-	var totReadMs, totWriteMs float64
-	var totBusyMs, totQMs float64
-	var totReadSectors, totWriteSectors float64
+	var totReadOps, totWriteOps, totReadMs, totWriteMs, totBusyMs, totQMs, totReadSectors, totWriteSectors float64
 	var nd int
-
 	for k := range cur {
 		if strings.HasPrefix(k, "counter_disk_reads_") {
 			dev := strings.TrimPrefix(k, "counter_disk_reads_")
@@ -693,13 +882,11 @@ func finalize(point Point, prevPoint Point) map[string]float64 {
 			out["disk_queue_depth_avg_total"] = totQMs / totBusyMs
 		}
 	}
-
 	if a, ok := cur["gauge_repl_lastApplied_sec"]; ok {
 		if c, ok := cur["gauge_repl_lastCommitted_sec"]; ok {
 			out["repl_commit_lag_secs"] = a - c
 		}
 	}
-
 	if v, ok := cur["gauge_wt_tickets_avail_read"]; ok {
 		out["wt_tickets_avail_read"] = v
 	}
@@ -715,12 +902,8 @@ func finalize(point Point, prevPoint Point) map[string]float64 {
 	if v, ok := cur["gauge_wt_cache_dirty_bytes_mb"]; ok {
 		out["wt_cache_dirty_bytes_mb"] = v
 	}
-
 	return out
 }
-
-/* ================================ Helpers ================================= */
-
 func groupOf(k string) string {
 	switch {
 	case strings.HasPrefix(k, "cpu_"), strings.HasPrefix(k, "sys_mem_"), strings.HasPrefix(k, "vmstat_"):
@@ -757,7 +940,6 @@ func groupOf(k string) string {
 		return "Other"
 	}
 }
-
 func findMetricFiles(dir string) ([]string, error) {
 	var out []string
 	re := regexp.MustCompile(`^metrics\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-\d{5}$`)
@@ -773,7 +955,6 @@ func findMetricFiles(dir string) ([]string, error) {
 	sort.Strings(out)
 	return out, nil
 }
-
 func getNum(v any) int64 {
 	switch t := v.(type) {
 	case float64:
@@ -790,7 +971,6 @@ func getNum(v any) int64 {
 	}
 	return 0
 }
-
 func extractBase64(doc map[string]any) string {
 	dm, ok := doc["data"].(map[string]any)
 	if !ok {
@@ -805,7 +985,6 @@ func extractBase64(doc map[string]any) string {
 	}
 	return ""
 }
-
 func splitConcatBSON(buf []byte) [][]byte {
 	var out [][]byte
 	i := 0
@@ -819,7 +998,6 @@ func splitConcatBSON(buf []byte) [][]byte {
 	}
 	return out
 }
-
 func pickTimestamp(m map[string]any) (time.Time, bool) {
 	if v, ok := getNestedValue(m, "end"); ok {
 		if tm, ok := asTime(v); ok {
@@ -838,7 +1016,6 @@ func pickTimestamp(m map[string]any) (time.Time, bool) {
 	}
 	return time.Time{}, false
 }
-
 func asTime(v any) (time.Time, bool) {
 	switch t := v.(type) {
 	case primitive.DateTime:
@@ -850,11 +1027,17 @@ func asTime(v any) (time.Time, bool) {
 	case float64:
 		return time.UnixMilli(int64(t)), true
 	case string:
+		if tm, err := time.Parse(time.RFC3339Nano, t); err == nil {
+			return tm, true
+		}
 		if tm, err := time.Parse(time.RFC3339, t); err == nil {
 			return tm, true
 		}
 	case map[string]any:
 		if s, ok := t["$date"].(string); ok {
+			if tm, err := time.Parse(time.RFC3339Nano, s); err == nil {
+				return tm, true
+			}
 			if tm, err := time.Parse(time.RFC3339, s); err == nil {
 				return tm, true
 			}
@@ -869,7 +1052,6 @@ func asTime(v any) (time.Time, bool) {
 	}
 	return time.Time{}, false
 }
-
 func getNestedValue(m map[string]any, key string) (any, bool) {
 	cur := any(m)
 	for _, p := range strings.Split(key, ".") {
@@ -904,7 +1086,6 @@ func getNestedValue(m map[string]any, key string) (any, bool) {
 	}
 	return cur, true
 }
-
 func getMap(m map[string]any, key string) (map[string]any, bool) {
 	v, ok := getNestedValue(m, key)
 	if !ok {
@@ -912,7 +1093,6 @@ func getMap(m map[string]any, key string) (map[string]any, bool) {
 	}
 	return toMap(v)
 }
-
 func toMap(v any) (map[string]any, bool) {
 	switch t := v.(type) {
 	case map[string]any:
@@ -929,7 +1109,6 @@ func toMap(v any) (map[string]any, bool) {
 		return nil, false
 	}
 }
-
 func getNestedString(m map[string]any, key string) (string, bool) {
 	if v, ok := getNestedValue(m, key); ok {
 		if s, ok := v.(string); ok {
@@ -938,7 +1117,6 @@ func getNestedString(m map[string]any, key string) (string, bool) {
 	}
 	return "", false
 }
-
 func getTimeSeconds(m map[string]any, key string) (float64, bool) {
 	if v, ok := getNestedValue(m, key); ok {
 		if tm, ok := asTime(v); ok {
@@ -947,39 +1125,12 @@ func getTimeSeconds(m map[string]any, key string) (float64, bool) {
 	}
 	return 0, false
 }
-
 func getFloat(m map[string]any, key string) (float64, bool) {
 	if v, ok := getNestedValue(m, key); ok {
-		switch t := v.(type) {
-		case float64:
-			return t, true
-		case int:
-			return float64(t), true
-		case int32:
-			return float64(t), true
-		case int64:
-			return float64(t), true
-		case primitive.Decimal128:
-			f, err := strconv.ParseFloat(t.String(), 64)
-			return f, err == nil
-		case map[string]any:
-			if s, ok := t["$numberLong"].(string); ok {
-				f, _ := strconv.ParseFloat(s, 64)
-				return f, true
-			}
-			if s, ok := t["$numberInt"].(string); ok {
-				f, _ := strconv.ParseFloat(s, 64)
-				return f, true
-			}
-			if s, ok := t["$numberDouble"].(string); ok {
-				f, _ := strconv.ParseFloat(s, 64)
-				return f, true
-			}
-		}
+		return toFloat(v)
 	}
 	return 0, false
 }
-
 func getFloatAny(m map[string]any, paths ...string) (float64, bool) {
 	for _, p := range paths {
 		if v, ok := getFloat(m, p); ok {
