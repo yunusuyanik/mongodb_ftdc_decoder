@@ -213,7 +213,7 @@
             type: 'time',
             min: new Date(labels[0]).getTime(),
             max: new Date(labels[labels.length - 1]).getTime(),
-            axisLabel: { formatter: useDailyTimeFormat ? '{MM}-{dd}' : '{HH}:{mm}' }
+            axisLabel: { formatter: useDailyTimeFormat ? '{MM}-{dd}' : '{hh}:{mm}' }
         },
         yAxis: {
             type: 'category', data: nodeNames, axisLabel: { interval: 0 }
@@ -394,19 +394,17 @@
     const series = seriesKeys.map((key, i) => {
       const displayName = getDisplayName(key, title);
       legendSelected[displayName] = true;
-      const arr = data.series[key] || Array(chartLabels.length).fill(null);
-      return { name: displayName, key: key, type:'line', data: arr, smooth: true, showSymbol:false, lineStyle:{width:2}, emphasis:{focus:'series'}, connectNulls:false };
+      const seriesData = (data.series[key] || []).map((val, index) => {
+        return [chartLabels[index].getTime(), val];
+      });
+      return { name: displayName, key: key, type:'line', data: seriesData, smooth: true, showSymbol:false, lineStyle:{width:2}, emphasis:{focus:'series'}, connectNulls:false };
     });
 
     chart.setOption({
       tooltip:{ trigger:'axis', confine:true, valueFormatter: (value) => fmt(value) + (unit ? ` ${unit}`: '') },
       color: palette, legend:{ show:false, selected: legendSelected },
       grid:{ left:55,right:25,top:40,bottom:36,containLabel:false },
-      xAxis:{ type:'category', data: chartLabels, axisLabel:{ hideOverlap: true, formatter: (value) => {
-          const date = new Date(value);
-          return useDailyTimeFormat ? echarts.format.formatTime('MM-dd', date) : echarts.format.formatTime('HH:mm', date);
-        }
-      }},
+      xAxis:{ type:'time', axisLabel:{ hideOverlap: true, formatter: useDailyTimeFormat ? '{MM}-{dd}' : '{HH}:{mm}' } },
       yAxis:{ type:'value', axisLine:{show:false}, splitLine:{lineStyle:{color:'#e5e7eb'}}, axisLabel: { formatter: (v) => fmt(v) } },
       series
     });
