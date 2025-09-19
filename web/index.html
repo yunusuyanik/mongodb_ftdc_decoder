@@ -258,7 +258,7 @@
           <h3>Version & Build</h3>
           <ul>
             <li><span>Hostname:</span> <span>${getConfigVal('hostInfo.system.hostname')}</span></li>
-            <li><span>Mongo Version:</span> <span>${getConfigVal('buildInfo.version')} (${(getConfigVal('buildInfo.modules.0', 'community'))})</span></li>
+            <li><span>Mongo Version:</span> <span>${getConfigVal('buildInfo.version')} (${(getConfigVal('buildInfo.modules.0', ''))})</span></li>
             <li><span>OS:</span> <span>${getConfigVal('hostInfo.os.name')}</span></li>
             <li><span>Git Version:</span> <span>${getConfigVal('buildInfo.gitVersion')}</span></li>
           </ul>
