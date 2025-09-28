@@ -13,6 +13,11 @@
     body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 Inter,system-ui,Segoe UI,Roboto,Arial}
     header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;gap:16px;align-items:center;background:var(--card)}
     h1{font-size:16px;margin:0}
+    /* Timezone CSS Eklentisi */
+    .timezone-selector {margin-left: auto; display: flex; align-items: center; gap: 8px;}
+    .timezone-selector label {font-size: 12px; font-weight: 500; color: var(--muted);}
+    .timezone-selector select {border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 12px; background: white;}
+    /* Ortak CSS devamı */
     .wrap{width:100%;margin:0 auto;padding:24px;display:grid;grid-template-columns:1fr;gap:18px}
     .section{margin-top:8px}
     .sec-title{font-size:18px;font-weight:700;margin:12px 0 16px 4px;color:#0f172a;cursor:pointer;position:relative;padding-left:20px;user-select:none}
@@ -65,20 +70,199 @@
 <body>
 <header>
   <h1>FTDC Dashboard</h1>
+  <div class="timezone-selector">
+    <label for="timezone-select">Timezone:</label>
+    <select id="timezone-select">
+      <option value="browser">Browser Time (Local)</option>
+      <option value="UTC" selected>UTC</option>
+      <option value="America/New_York">EST/EDT (-05:00/-04:00)</option>
+      <option value="America/Chicago">CST/CDT (-06:00/-05:00)</option>
+      <option value="America/Denver">MST/MDT (-07:00/-06:00)</option>
+      <option value="America/Los_Angeles">PST/PDT (-08:00/-07:00)</option>
+      <option value="Europe/London">GMT/BST (+00:00/+01:00)</option>
+      <option value="Europe/Paris">CET/CEST (+01:00/+02:00)</option>
+      <option value="Europe/Istanbul">TRT (+03:00)</option>
+      <option value="Asia/Dubai">GST (+04:00)</option>
+      <option value="Asia/Kolkata">IST (+05:30)</option>
+      <option value="Asia/Shanghai">CST (+08:00)</option>
+      <option value="Asia/Tokyo">JST (+09:00)</option>
+      <option value="Australia/Sydney">AEST/AEDT (+10:00/+11:00)</option>
+    </select>
+  </div>
 </header>
 
 <div class="wrap" id="wrap"></div>
 
 <script>
+// --- BAŞLANGIÇ: Timezone Yönetimi ve Fonksiyonları ---
+let currentTimezone = 'UTC';
+let timezoneOffset = 0; 
+let globalData = {}; // Data'yı global tutmak için
+
+function updateTimezoneOffset() {
+  if (currentTimezone === 'browser') {
+    // Browser time'da ofset gerekmez, JS zaten yerel saatte çalışır
+    timezoneOffset = 0; 
+  } else if (currentTimezone === 'UTC') {
+    timezoneOffset = 0;
+  } else {
+    try {
+        // Belirtilen timezone'a göre ofseti hesapla
+        const now = new Date();
+        const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000); 
+        const tzTime = new Date(now.toLocaleString('en-US', { timeZone: currentTimezone })).getTime();
+        timezoneOffset = tzTime - utcTime; 
+    } catch (e) {
+      console.warn('Error calculating timezone offset, falling back to UTC', e);
+      timezoneOffset = 0;
+      currentTimezone = 'UTC';
+      document.getElementById('timezone-select').value = 'UTC';
+    }
+  }
+}
+
+/**
+ * UTC timestamp'i seçilen zaman dilimine göre formatlar.
+ * @param {number} timestamp - UTC zamanı (milliseconds).
+ * @param {string} type - 'short' (akıllı x-ekseni) veya 'full' (tooltip için).
+ * @param {number} [durationHours=0] - Toplam gösterilen zaman aralığı (saat cinsinden).
+ * @returns {string} Formatlanmış zaman string'i.
+ */
+function formatTimeForTimezone(timestamp, type, durationHours = 0) {
+  let date;
+
+  if (currentTimezone === 'browser') {
+    // Browser Timezone kullanılıyorsa, tarih objesini olduğu gibi kullan
+    date = new Date(timestamp);
+  } else {
+    // Diğer Timezone'lar için, UTC zamanına ofseti ekle
+    date = new Date(timestamp + timezoneOffset);
+  }
+
+  const tzOpt = currentTimezone === 'browser' ? undefined : { timeZone: 'UTC' }; // date.toLocaleString'e 'UTC' dersek, offset'li tarih yerel saatmiş gibi davranır
+  
+  if (type === 'full') {
+    // Her zaman tam format: "Mar 12, 2024 14:30:45 UTC"
+    const options = {
+      year: 'numeric', month: 'short', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', 
+      hour12: false, 
+      ...tzOpt
+    };
+    let timeStr = date.toLocaleString('en-US', options);
+    // TimeZone adını sonuna ekle (UTC, EST vb.)
+    if (currentTimezone === 'browser') {
+        return timeStr;
+    } else if (currentTimezone === 'UTC') {
+        return `${timeStr} UTC`;
+    } else {
+        return `${timeStr} ${currentTimezone.split('/').pop().replace('_', ' ')}`;
+    }
+
+
+  } else if (type === 'short') {
+    // X-ekseni için akıllı formatlama
+    if (durationHours > 48) { 
+      // 48 saatten uzun: "Mar 12" formatında
+      return date.toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: '2-digit',
+        ...tzOpt
+      });
+    } else {
+      // 48 saatten kısa: "14:30" formatında
+      return date.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: false,
+        ...tzOpt
+      });
+    }
+  }
+}
+
+
+function updateAllCharts() {
+  const L = globalData.labels;
+  const totalDurationHours = (L && L.length > 1) 
+      ? (new Date(L[L.length - 1]).getTime() - new Date(L[0]).getTime()) / (1000 * 60 * 60) 
+      : 0;
+
+  document.querySelectorAll('.chart, .repl-chart').forEach(chartEl => {
+    const chart = echarts.getInstanceByDom(chartEl);
+    if (chart) {
+      const option = chart.getOption();
+      
+      // 1. X-Ekseni Formatını Güncelle
+      if (option.xAxis && option.xAxis[0]) {
+        option.xAxis[0].axisLabel = {
+          ...option.xAxis[0].axisLabel,
+          formatter: function(value) {
+            return formatTimeForTimezone(value, 'short', totalDurationHours); 
+          }
+        };
+      }
+      
+      // 2. Standart Chart Tooltip Formatını Güncelle (Axis Pointer)
+      if (option.tooltip && option.tooltip.trigger === 'axis' && option.xAxis) {
+         // Tooltip'i tamamen yeniden yazmak yerine, timestamp'i doğru şekilde formatlayalım.
+         // ECharts'ın default tooltip formatlayıcısını kullanmak yerine, tam kontrol için formatter'ı ayarla
+         option.tooltip.formatter = function(params) {
+              if (params.length === 0) return '';
+              let output = formatTimeForTimezone(params[0].value[0], 'full'); // X eksenindeki zamanı formatla
+              params.forEach(param => {
+                  const unit = chartEl.closest('.card').querySelector('.tbl')?.querySelector('tbody')?.querySelector(`tr[data-key="${param.seriesName}"]`)?.children[1]?.textContent.split(' ').pop() || '';
+                  output += `<br/><span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${param.color};"></span>${param.seriesName}: ${fmt(param.value[1])} ${unit}`;
+              });
+              return output;
+          };
+      }
+      
+      // 3. Timeline Chart Tooltip Formatını Güncelle (sadece repl-chart için)
+      if (option.series && option.series[0] && option.series[0].type === 'custom') {
+          const nodeNames = option.yAxis[0].data; 
+          option.tooltip.formatter = function(params) {
+              if (Array.isArray(params)) { return 'Error: Array in timeline tooltip'; }
+              
+              const state = params.value[3];
+              const start = formatTimeForTimezone(params.value[1], 'full');
+              const end = formatTimeForTimezone(params.value[2], 'full');
+              
+              return `${nodeNames[params.value[0]]}<br/><b>${state}</b><br/>${start} - ${end}`;
+          };
+      }
+
+
+      chart.setOption(option, { notMerge: false });
+    }
+  });
+}
+
+// Timezone selector event listener
+document.getElementById('timezone-select').addEventListener('change', function(e) {
+  currentTimezone = e.target.value;
+  updateTimezoneOffset();
+  updateAllCharts();
+});
+
+updateTimezoneOffset();
+
 (async function () {
-  const res = await fetch('/api/data');
-  const data = await res.json();
+  try {
+    const res = await fetch('/api/data'); 
+    globalData = await res.json(); // Data'yı global değişkene ata
+  } catch (e) {
+    console.error("Veri çekilemedi. Grafik çizimi boş veriyle devam ediyor.", e);
+    // Hata durumunda boş, ancak geçerli bir data yapısıyla devam et.
+    globalData = { labels: [], series: {}, config: {}, repl_timeline: [] };
+  }
 
   const W = document.getElementById('wrap');
-  const L = data.labels;
+  const L = globalData.labels;
 
   const totalDurationHours = (L && L.length > 1) ? (new Date(L[L.length - 1]).getTime() - new Date(L[0]).getTime()) / (1000 * 60 * 60) : 0;
-  const useDailyTimeFormat = totalDurationHours > 48;
+  // Eski kodunuzdaki useDailyTimeFormat kontrolü artık formatTimeForTimezone içinde yapılıyor.
+  // const useDailyTimeFormat = totalDurationHours > 48; 
 
   function buildReplStatusChartContainer(timeline) {
     if (!timeline || timeline.length === 0) return null;
@@ -196,9 +380,10 @@
     const option = {
         tooltip: {
             formatter: function (params) {
+                // Timezone fonksiyonunu kullanmak için burada güncellendi
                 const state = params.value[3];
-                const start = new Date(params.value[1]).toLocaleString();
-                const end = new Date(params.value[2]).toLocaleString();
+                const start = formatTimeForTimezone(params.value[1], 'full');
+                const end = formatTimeForTimezone(params.value[2], 'full');
                 return `${nodeNames[params.value[0]]}<br/><b>${state}</b><br/>${start} - ${end}`;
             }
         },
@@ -213,7 +398,12 @@
             type: 'time',
             min: new Date(labels[0]).getTime(),
             max: new Date(labels[labels.length - 1]).getTime(),
-            axisLabel: { formatter: useDailyTimeFormat ? '{MM}-{dd}' : '{hh}:{mm}' }
+            axisLabel: { 
+                // Timezone fonksiyonunu kullanmak için güncellendi
+                formatter: function(value) {
+                    return formatTimeForTimezone(value, 'short', totalDurationHours);
+                }
+            }
         },
         yAxis: {
             type: 'category', data: nodeNames, axisLabel: { interval: 0 }
@@ -228,7 +418,7 @@
 
   const getConfigVal = (path, fallback = 'N/A') => {
     try {
-      const value = path.split('.').reduce((o, k) => o[k], data.config);
+      const value = path.split('.').reduce((o, k) => o[k], globalData.config);
       if (typeof value === 'object' && value !== null) {
         if ('$numberInt' in value) return value['$numberInt'];
         if ('$numberLong' in value) return value['$numberLong'];
@@ -314,7 +504,7 @@
     return section;
   }
   
-  const summaryEl = buildSummaryViewer(data.config, data.config_changed);
+  const summaryEl = buildSummaryViewer(globalData.config, globalData.config_changed);
   if (summaryEl) {
     W.appendChild(summaryEl);
     const content = summaryEl.querySelector('.summary-container');
@@ -323,10 +513,10 @@
     }
   }
 
-  const replChartContainerEl = buildReplStatusChartContainer(data.repl_timeline);
+  const replChartContainerEl = buildReplStatusChartContainer(globalData.repl_timeline);
   if (replChartContainerEl) {
     W.appendChild(replChartContainerEl);
-    initReplStatusChart(replChartContainerEl, data.repl_timeline, data.labels);
+    initReplStatusChart(replChartContainerEl, globalData.repl_timeline, globalData.labels);
   }
 
   function stats(arr){
@@ -380,13 +570,19 @@
   }
 
   function buildCard(grid, title, seriesKeys, unit){
-    if (!seriesKeys || !seriesKeys.some(k => data.series[k])) return;
+    // globalData.series'i kullan
+    if (!seriesKeys || !seriesKeys.some(k => globalData.series[k])) return;
     const card = document.createElement('div');
     card.className = 'card';
     card.innerHTML = `<div class="pane"><div class="title">${title}</div><div class="chart"></div></div><div class="tablewrap"><div class="actions"><span class="chip">series</span><button class="btn" data-act="all">All</button><button class="btn" data-act="none">None</button><button class="btn" data-act="inverse">Inverse</button></div><table class="tbl"><thead><tr><th class="sortable asc" data-k="name">name</th><th class="sortable" data-k="min">min</th><th class="sortable" data-k="avg">avg</th><th class="sortable" data-k="max">max</th><th class="sortable" data-k="p95">p95</th></tr></thead><tbody></tbody></table></div>`;
     grid.appendChild(card);
     
-    const chartLabels = L.map(ts => new Date(ts));
+    // Zaman damgalarını milisaniye olarak al
+    const chartLabels = L.map(ts => new Date(ts).getTime());
+    
+    const cardDurationHours = (chartLabels && chartLabels.length > 1) 
+        ? (chartLabels[chartLabels.length - 1] - chartLabels[0]) / (1000 * 60 * 60) 
+        : 0;
 
     const chart = echarts.init(card.querySelector('.chart'), 'light', {renderer:'canvas'});
     const palette = ['#2563eb','#16a34a','#f59e0b','#ef4444','#8b5cf6','#0ea5e9','#f97316','#22c55e','#e11d48','#10b981','#a855f7','#84cc16'];
@@ -394,17 +590,41 @@
     const series = seriesKeys.map((key, i) => {
       const displayName = getDisplayName(key, title);
       legendSelected[displayName] = true;
-      const seriesData = (data.series[key] || []).map((val, index) => {
-        return [chartLabels[index].getTime(), val];
+      // globalData.series[key]'i kullan
+      const seriesData = (globalData.series[key] || []).map((val, index) => {
+        return [chartLabels[index], val];
       });
       return { name: displayName, key: key, type:'line', data: seriesData, smooth: true, showSymbol:false, lineStyle:{width:2}, emphasis:{focus:'series'}, connectNulls:false };
     });
 
+    // Option ayarları Timezone fonksiyonlarını kullanacak şekilde güncellendi
     chart.setOption({
-      tooltip:{ trigger:'axis', confine:true, valueFormatter: (value) => fmt(value) + (unit ? ` ${unit}`: '') },
-      color: palette, legend:{ show:false, selected: legendSelected },
+      tooltip:{ 
+        trigger:'axis', 
+        confine:true, 
+        // Tam kontrol için formatter'ı ayarla
+        formatter: function(params) {
+              if (params.length === 0) return '';
+              let output = formatTimeForTimezone(params[0].value[0], 'full'); // X eksenindeki zamanı formatla
+              params.forEach(param => {
+                  output += `<br/><span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${param.color};"></span>${param.seriesName}: ${fmt(param.value[1])} ${unit||''}`;
+              });
+              return output;
+        }
+      },
+      color: palette, 
+      legend:{ show:false, selected: legendSelected },
       grid:{ left:55,right:25,top:40,bottom:36,containLabel:false },
-      xAxis:{ type:'time', axisLabel:{ hideOverlap: true, formatter: useDailyTimeFormat ? '{MM}-{dd}' : '{HH}:{mm}' } },
+      xAxis:{ 
+        type:'time', 
+        axisLabel:{ 
+          hideOverlap: true, 
+          // Timezone fonksiyonunu kullanmak için güncellendi
+          formatter: function(value) {
+            return formatTimeForTimezone(value, 'short', cardDurationHours);
+          }
+        } 
+      },
       yAxis:{ type:'value', axisLine:{show:false}, splitLine:{lineStyle:{color:'#e5e7eb'}}, axisLabel: { formatter: (v) => fmt(v) } },
       series
     });
@@ -413,7 +633,8 @@
     const thead = card.querySelector('thead');
     const btns = card.querySelectorAll('.actions .btn');
     let rows = seriesKeys.map((key, i) => {
-      const arr = data.series[key] || [];
+      // globalData.series[key]'i kullan
+      const arr = globalData.series[key] || [];
       const st = stats(arr);
       return { key: key, displayName: getDisplayName(key, title), idx:i, color: palette[i % palette.length], min: st.min, max: st.max, avg: st.avg, p95: st.p95, on: true };
     });
@@ -467,14 +688,16 @@
         renderRows();
       });
     });
+
     window.addEventListener('resize', () => {
         document.querySelectorAll('.chart, .repl-chart').forEach(c => echarts.getInstanceByDom(c)?.resize());
         document.querySelectorAll('.sec-title:not(.collapsed) + .grid, .summary-container').forEach(grid => {
-            if (grid.style.maxHeight !== '0px') {
-                grid.style.maxHeight = grid.scrollHeight + 'px';
-            }
+          if (grid.style.maxHeight !== '0px') {
+            grid.style.maxHeight = grid.scrollHeight + 'px';
+          }
         });
     });
+
     return card;
   }
   
@@ -493,12 +716,14 @@
   buildCard(gWT, 'Tickets', ['wt_tickets_avail_read','wt_tickets_avail_write'], '');
 
   const gOS = buildSection('OS');
+  // Eski kodunuzdaki OS metrikleri kullanıldı
   buildCard(gOS, 'CPU (%)', ['cpu_user_percent','cpu_system_percent','cpu_iowait_percent','cpu_softirq_percent','cpu_nice_percent','cpu_idle_percent'], '%');
   buildCard(gOS, 'Memory (MB)', ['sys_mem_available_mb','sys_mem_total_mb'], 'MB');
   buildCard(gOS, 'Network (MB/s)', ['network_bytes_in_per_sec','network_bytes_out_per_sec'], 'MB/s');
-
+  // Load Average/Diskler için eski kodunuzdaki tanımlamalar kullanıldı
+  
   const gDisk = buildSection('OS / Disks');
-  const allKeys = Object.keys(data.series);
+  const allKeys = Object.keys(globalData.series);
   const iopsKeys    = allKeys.filter(k => k.startsWith('disk_') && (k.includes('_read_iops_') || k.includes('_write_iops_')));
   const mbpsKeys    = allKeys.filter(k => k.startsWith('disk_') && (k.includes('_read_mbps_') || k.includes('_write_mbps_')));
   const latKeys     = allKeys.filter(k => k.startsWith('disk_') && (k.includes('_read_latency_ms_') || k.includes('_write_latency_ms_')));
@@ -509,6 +734,11 @@
   buildCard(gDisk, 'Disk Latency (ms per device)', latKeys, 'ms');
   buildCard(gDisk, 'Disk Utilization (% per device)', utilKeys, '%');
   buildCard(gDisk, 'Disk Queue Depth (avg per device)', queueKeys, '');
+
+  // Initialize section collapsed states
+  document.querySelectorAll('.grid').forEach(grid => {
+    grid.style.maxHeight = grid.scrollHeight + 'px';
+  });
 })();
 </script>
 </body>
