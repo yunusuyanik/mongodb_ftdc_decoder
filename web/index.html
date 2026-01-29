@@ -60,6 +60,17 @@
     .config-change-dot { color: var(--red); margin-left: 8px; font-size: 16px; line-height: 1; display: inline-block; vertical-align: middle; }
     .repl-chart-container { background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05); padding: 16px; }
     .repl-chart { width: 100%; }
+    .custom-metrics-card { grid-column: 1 / -1; }
+    .card.wide-card { grid-column: 1 / -1; }
+    .custom-metrics-chart { width: 100%; min-height: 320px; }
+    .metrics-selector { position: relative; margin-bottom: 12px; }
+    .metrics-selector summary, .metrics-selector .dropdown-trigger { cursor: pointer; font-weight: 600; font-size: 14px; color: var(--fg); padding: 8px 12px; background: var(--subtle); border: 1px solid var(--border); border-radius: 8px; display: inline-block; user-select: none; list-style: none; }
+    .metrics-selector summary::-webkit-details-marker { display: none; }
+    .metrics-dropdown { display: none; margin-top: 8px; padding: 12px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; max-height: 280px; overflow-y: auto; }
+    .metrics-selector details[open] .metrics-dropdown { display: block; }
+    .metrics-dropdown label { display: block; padding: 4px 0; cursor: pointer; font-size: 13px; }
+    .metrics-dropdown label:hover { background: var(--subtle); }
+    .metrics-dropdown input { margin-right: 8px; }
     @media (min-width: 1200px) { .grid { grid-template-columns: repeat(2, 1fr); } }
     @media (max-width: 1024px) { .summary-container { grid-template-columns: 1fr; } }
     @media (max-width: 768px) { .summary-grid { grid-template-columns: 1fr; } }
@@ -504,6 +515,99 @@ updateTimezoneOffset();
     return section;
   }
   
+  function buildCustomMetricsChart() {
+    const section = document.createElement('div');
+    section.className = 'section';
+    const secTitle = document.createElement('div');
+    secTitle.className = 'sec-title';
+    secTitle.textContent = 'Custom metrics';
+    section.appendChild(secTitle);
+
+    const card = document.createElement('div');
+    card.className = 'card custom-metrics-card';
+    const keys = globalData.keys || [];
+    const chartLabels = (globalData.labels || []).map(ts => new Date(ts).getTime());
+    const totalDurationHours = (chartLabels.length > 1) ? (chartLabels[chartLabels.length - 1] - chartLabels[0]) / (1000 * 60 * 60) : 0;
+    const palette = ['#2563eb','#16a34a','#f59e0b','#ef4444','#8b5cf6','#0ea5e9','#f97316','#22c55e','#e11d48','#10b981','#a855f7','#84cc16'];
+
+    card.innerHTML = `
+      <div class="pane">
+        <div class="title">Select metrics to plot</div>
+        <div class="metrics-selector">
+          <details>
+            <summary>Metrics (${keys.length} total) — click to select</summary>
+            <div class="metrics-dropdown" id="custom-metrics-checkboxes"></div>
+          </details>
+        </div>
+        <div class="chart custom-metrics-chart" id="custom-metrics-chart"></div>
+      </div>
+    `;
+    section.appendChild(card);
+
+    const checkboxContainer = card.querySelector('#custom-metrics-checkboxes');
+    const chartDom = card.querySelector('#custom-metrics-chart');
+
+    const selectedKeys = new Set();
+    keys.forEach(key => {
+      const label = document.createElement('label');
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.dataset.key = key;
+      input.addEventListener('change', () => {
+        if (input.checked) selectedKeys.add(key); else selectedKeys.delete(key);
+        updateCustomChart();
+      });
+      label.appendChild(input);
+      label.appendChild(document.createTextNode(key));
+      checkboxContainer.appendChild(label);
+    });
+
+    function updateCustomChart() {
+      const arr = Array.from(selectedKeys);
+      if (arr.length === 0) {
+        myChart.setOption({ series: [], xAxis: { type: 'time' }, yAxis: { type: 'value' } }, { notMerge: true });
+        return;
+      }
+      const series = arr.map((key) => {
+        const raw = globalData.series[key] || [];
+        const data = [];
+        for (let i = 0; i < raw.length; i++) {
+          const t = chartLabels[i];
+          const v = raw[i];
+          if (t != null && typeof v === 'number' && !Number.isNaN(v)) data.push([t, v]);
+        }
+        return { name: key, type: 'line', data, smooth: true, showSymbol: false, lineStyle: { width: 2 }, emphasis: { focus: 'series' }, connectNulls: true };
+      });
+      myChart.setOption({
+        color: palette,
+        tooltip: { trigger: 'axis', confine: true, formatter: function(params) {
+          if (!params || params.length === 0) return '';
+          let output = formatTimeForTimezone(params[0].value[0], 'full');
+          params.forEach(param => { output += `<br/><span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${param.color};"></span>${param.seriesName}: ${(param.value[1] != null && !Number.isNaN(param.value[1]) ? param.value[1].toFixed(2) : '—')}`; });
+          return output;
+        }},
+        legend: { show: true, type: 'scroll', bottom: 0 },
+        grid: { left: 55, right: 25, top: 40, bottom: 36, containLabel: false },
+        xAxis: { type: 'time', axisLabel: { hideOverlap: true, formatter: function(value) { return formatTimeForTimezone(value, 'short', totalDurationHours); } } },
+        yAxis: { type: 'value', axisLine: { show: false }, splitLine: { lineStyle: { color: '#e5e7eb' } }, axisLabel: { formatter: v => (v != null && !Number.isNaN(v) ? v.toFixed(2) : '—') } },
+        series
+      }, { notMerge: true, replaceMerge: ['series'] });
+      myChart.resize();
+    }
+
+    secTitle.addEventListener('click', () => {
+      secTitle.classList.toggle('collapsed');
+      const isCollapsed = secTitle.classList.contains('collapsed');
+      card.style.maxHeight = isCollapsed ? '0' : 'none';
+      card.style.overflow = isCollapsed ? 'hidden' : 'visible';
+    });
+
+    W.appendChild(section);
+    const myChart = echarts.init(chartDom);
+  }
+
+  buildCustomMetricsChart();
+
   const summaryEl = buildSummaryViewer(globalData.config, globalData.config_changed);
   if (summaryEl) {
     W.appendChild(summaryEl);
@@ -518,6 +622,10 @@ updateTimezoneOffset();
     W.appendChild(replChartContainerEl);
     initReplStatusChart(replChartContainerEl, globalData.repl_timeline, globalData.labels);
   }
+
+  const gRepl = buildSection('Replication');
+  const replLagKeys = (globalData.keys || []).filter(k => k.startsWith('repl_lag_sec_'));
+  if (replLagKeys.length) buildCard(gRepl, 'Replication lag (per secondary)', replLagKeys, 'sec', true);
 
   function stats(arr){
     const vals = (arr||[]).filter(v => typeof v === 'number' && !Number.isNaN(v));
@@ -566,14 +674,17 @@ updateTimezoneOffset();
       if (key.startsWith('wt_pages_evicted_')) {
         return key.includes('_modified_') ? 'modified' : 'unmodified';
       }
+      if (key.startsWith('repl_lag_sec_')) {
+        return key.replace(/^repl_lag_sec_/, '');
+      }
       return key;
   }
 
-  function buildCard(grid, title, seriesKeys, unit){
+  function buildCard(grid, title, seriesKeys, unit, wide){
     // globalData.series'i kullan
     if (!seriesKeys || !seriesKeys.some(k => globalData.series[k])) return;
     const card = document.createElement('div');
-    card.className = 'card';
+    card.className = 'card' + (wide ? ' wide-card' : '');
     card.innerHTML = `<div class="pane"><div class="title">${title}</div><div class="chart"></div></div><div class="tablewrap"><div class="actions"><span class="chip">series</span><button class="btn" data-act="all">All</button><button class="btn" data-act="none">None</button><button class="btn" data-act="inverse">Inverse</button></div><table class="tbl"><thead><tr><th class="sortable asc" data-k="name">name</th><th class="sortable" data-k="min">min</th><th class="sortable" data-k="avg">avg</th><th class="sortable" data-k="max">max</th><th class="sortable" data-k="p95">p95</th></tr></thead><tbody></tbody></table></div>`;
     grid.appendChild(card);
     
