@@ -673,8 +673,82 @@ func collectRaw(root map[string]any) map[string]float64 {
 		if sec, ok := getTimeSeconds(repl, "optimes.lastCommittedWallTime"); ok {
 			out["gauge_repl_lastCommitted_sec"] = sec
 		}
+		// Replication lag per secondary: primary optimeDate minus each secondary's optimeDate (seconds behind).
+		if membersVal, ok := getNestedValue(repl, "members"); ok {
+			if membersSlice, ok := membersVal.(primitive.A); ok {
+				var primarySec float64
+				var foundPrimary bool
+				for _, memberVal := range membersSlice {
+					memberMap, ok := toMap(memberVal)
+					if !ok {
+						continue
+					}
+					stateStr, _ := getNestedString(memberMap, "stateStr")
+					if stateStr != "PRIMARY" {
+						continue
+					}
+					if sec, ok := getTimeSeconds(memberMap, "optimeDate"); ok {
+						primarySec = sec
+						foundPrimary = true
+						break
+					}
+					if sec, ok := getTimeSeconds(memberMap, "lastAppliedWallTime"); ok {
+						primarySec = sec
+						foundPrimary = true
+						break
+					}
+				}
+				if !foundPrimary {
+					goto replDone
+				}
+				for _, memberVal := range membersSlice {
+					memberMap, ok := toMap(memberVal)
+					if !ok {
+						continue
+					}
+					stateStr, _ := getNestedString(memberMap, "stateStr")
+					if stateStr != "SECONDARY" {
+						continue
+					}
+					name, hasName := getNestedString(memberMap, "name")
+					if !hasName || name == "" {
+						continue
+					}
+					var sec float64
+					if s, ok := getTimeSeconds(memberMap, "optimeDate"); ok {
+						sec = s
+					} else if s, ok := getTimeSeconds(memberMap, "lastAppliedWallTime"); ok {
+						sec = s
+					} else {
+						continue
+					}
+					lag := primarySec - sec
+					if lag < 0 {
+						lag = 0
+					}
+					out["gauge_repl_lag_sec_"+sanitizeReplMemberName(name)] = lag
+				}
+			}
+		}
+	replDone:
 	}
 	return out
+}
+
+// sanitizeReplMemberName turns a member host:port name into a safe metric key suffix.
+func sanitizeReplMemberName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch r {
+		case '.', ':', '/', '-':
+			b.WriteRune('_')
+		default:
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
 }
 func finalize(point Point, prevPoint Point) map[string]float64 {
 	cur, prev, dt := point.Metrics, prevPoint.Metrics, point.T.Sub(prevPoint.T).Seconds()
